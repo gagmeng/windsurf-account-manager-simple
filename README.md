@@ -7,7 +7,9 @@
 ## 📱 交流群
 
 <p align="center">
-  <img src="public/交流群.png" alt="交流群二维码" width="300">
+  <img src="public/交流群.png" alt="微信群二维码" width="300">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="public/QQ群.jpg" alt="QQ群二维码" width="300">
 </p>
 
 ---
