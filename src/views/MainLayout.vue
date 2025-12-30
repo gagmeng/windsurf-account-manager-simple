@@ -61,12 +61,10 @@
           <template #title>统计信息</template>
         </el-menu-item>
         
-        <!-- 自动重置功能已在 simple 版本中禁用
         <el-menu-item index="auto-reset" @click="showAutoResetDialog = true">
           <el-icon><Timer /></el-icon>
           <template #title>自动重置</template>
         </el-menu-item>
-        -->
         
         <el-menu-item index="card-generator" @click="showCardGeneratorDialog = true">
           <el-icon><CreditCard /></el-icon>
@@ -154,7 +152,6 @@
             </el-badge>
           </el-tooltip>
           
-          <!-- 批量转让订阅 - simple 版本已禁用
           <el-tooltip content="批量转让订阅" placement="bottom" v-if="accountsStore.selectedAccounts.size > 0">
             <el-button
               type="success"
@@ -163,7 +160,6 @@
               @click="showBatchTransferDialog = true"
             />
           </el-tooltip>
-          -->
           
           <!-- 批量刷新状态 -->
           <el-tooltip content="批量刷新状态" placement="bottom" v-if="accountsStore.selectedAccounts.size > 0">
@@ -175,7 +171,6 @@
             />
           </el-tooltip>
           
-          <!-- 批量更换订阅 - simple 版本已禁用
           <el-tooltip content="批量更换订阅" placement="bottom" v-if="accountsStore.selectedAccounts.size > 0">
             <el-button
               type="primary"
@@ -184,7 +179,6 @@
               @click="showBatchUpdatePlanDialog = true"
             />
           </el-tooltip>
-          -->
           
           <!-- 导出选中账号 -->
           <el-tooltip content="导出选中账号" placement="bottom" v-if="accountsStore.selectedAccounts.size > 0">
@@ -422,9 +416,7 @@
       :windsurf-version="windsurfVersion"
     />
     
-    <!-- 自动重置对话框 - simple 版本已禁用
     <AutoResetDialog v-model="showAutoResetDialog" />
-    -->
     
     <!-- 虚拟卡生成对话框 -->
     <CardGeneratorDialog v-model="showCardGeneratorDialog" />
@@ -589,13 +581,13 @@ import {
   Select,
   Download,
   Upload,
-  // Trophy, // simple 版本已禁用
+  Trophy,
   Filter,
   Close,
   PriceTag,
   DocumentChecked,
-  // Timer, // simple 版本已禁用
-  // Switch, // simple 版本已禁用
+  Timer,
+  Switch,
   SortUp,
   SortDown
 } from '@element-plus/icons-vue';
@@ -615,7 +607,7 @@ import AccountInfoDialog from '@/components/AccountInfoDialog.vue';
 import AboutDialog from '@/components/AboutDialog.vue';
 import BatchUpdatePlanDialog from '@/components/BatchUpdatePlanDialog.vue';
 import TagManageDialog from '@/components/TagManageDialog.vue';
-// import AutoResetDialog from '@/components/AutoResetDialog.vue'; // simple 版本已禁用
+import AutoResetDialog from '@/components/AutoResetDialog.vue';
 import CardGeneratorDialog from '@/components/CardGeneratorDialog.vue';
 
 const accountsStore = useAccountsStore();
@@ -637,7 +629,7 @@ const appVersion = ref<string>('');  // 版本号从后端动态获取
 const showBatchGroupDialog = ref(false);
 const batchGroupTarget = ref('');
 const isBatchUpdatingGroup = ref(false);
-// const showAutoResetDialog = ref(false); // simple 版本已禁用
+const showAutoResetDialog = ref(false);
 const showCardGeneratorDialog = ref(false);
 
 // 排序相关

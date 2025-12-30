@@ -12,6 +12,12 @@ use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::{HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS}};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct GoogleTokenResponse {
     access_token: String,
@@ -202,8 +208,10 @@ async fn trigger_windsurf_callback(auth_token: &str) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        Command::new("cmd")
-            .args(&["/c", "start", "", &callback_url])
+        // 使用 PowerShell 的 Start-Process 来正确处理包含特殊字符的 URL
+        Command::new("powershell")
+            .args(&["-NoProfile", "-Command", &format!("Start-Process '{}'", callback_url)])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| AppError::FileOperation(format!("Failed to open URL: {}", e)))?;
     }

@@ -186,7 +186,6 @@
           />
         </el-tooltip>
 
-        <!-- 删除用户(Windsurf) - simple 版本已禁用
         <el-tooltip content="删除用户(Windsurf)" placement="top">
           <el-button
             size="small"
@@ -198,7 +197,6 @@
             @click="handleDeleteWindsurfUser"
           />
         </el-tooltip>
-        -->
 
         <el-tooltip content="删除" placement="top">
           <el-button
@@ -261,7 +259,6 @@
           />
         </el-tooltip>
 
-        <!-- 更换订阅 - simple 版本已禁用
         <el-tooltip content="更换订阅" placement="top">
           <el-button
             size="small"
@@ -271,7 +268,6 @@
             :loading="isUpdatingPlan"
           />
         </el-tooltip>
-        -->
 
         <el-tooltip content="获取试用链接" placement="top">
           <el-button
@@ -366,9 +362,9 @@ import {
   Setting,
   UserFilled,
   Money,
-  // Sell, // simple 版本已禁用
+  Sell,
   Refresh,
-  // Rank // simple 版本已禁用
+  Rank
 } from '@element-plus/icons-vue';
 import type { Account } from '@/types';
 import { apiService, accountApi } from '@/api';
@@ -542,7 +538,7 @@ const isGettingTrialLink = ref(false);
 const deletingUser = ref(false);
 const isSwitching = ref(false);
 const isResettingCredits = ref(false);
-// const isUpdatingPlan = ref(false); // simple 版本已禁用
+const isUpdatingPlan = ref(false);
 const billingData = ref<any>(null);
 const showCreditHistoryDialog = ref(false);
 const showSeatsResultDialog = ref(false);
@@ -1414,9 +1410,6 @@ async function handleSwitchAccount() {
   }
 }
 
-// simple 版本已禁用的功能 - 保留函数避免 TypeScript 报错
-void handleUpdatePlan;
-void handleDeleteWindsurfUser;
 </script>
 
 <style scoped>
