@@ -364,7 +364,6 @@ import {
   Money,
   Sell,
   Refresh,
-  Rank
 } from '@element-plus/icons-vue';
 import type { Account } from '@/types';
 import { apiService, accountApi } from '@/api';
