@@ -2,18 +2,15 @@
 .SYNOPSIS
     Windsurf 寸止 MCP 安装脚本
 .DESCRIPTION
-    安装 Windsurf 寸止 MCP 服务器和 Tauri UI
+    安装 Windsurf 寸止 MCP 服务器（单二进制，包含 UI）
 .PARAMETER InstallPath
     安装目标路径，默认为用户本地目录
 .PARAMETER NoBuild
     跳过编译，直接使用已有的可执行文件
-.PARAMETER BuildTauri
-    编译 Tauri UI（需要 Node.js 环境）
 #>
 param(
     [string]$InstallPath = "$env:LOCALAPPDATA\windsurf-cunzhi",
-    [switch]$NoBuild,
-    [switch]$BuildTauri
+    [switch]$NoBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,27 +27,23 @@ Write-Host "║       Windsurf Cunzhi MCP - Installer                      ║" 
 Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
 Write-Host ""
 
-# 定义文件路径
+# 定义文件路径（单二进制模式）
 $mcpExe = Join-Path $scriptDir "target\release\windsurf-cunzhi.exe"
-$tauriUiExe = Join-Path $scriptDir "src-tauri\target\release\windsurf-cunzhi-ui.exe"
 
 # 设置 Rust 环境
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 
 # 检查预编译文件
 $hasMcpExe = Test-Path $mcpExe
-$hasTauriUi = Test-Path $tauriUiExe
 
 if ($hasMcpExe) {
-    Write-Ok "Found MCP server: $mcpExe"
-}
-if ($hasTauriUi) {
-    Write-Ok "Found Tauri UI: $tauriUiExe"
+    Write-Ok "Found executable: $mcpExe"
 }
 
-# 编译 MCP 服务器
+# 编译（单二进制，包含 MCP 和 UI）
 if (-not $hasMcpExe -and -not $NoBuild) {
-    Write-Info "Building MCP server..."
+    Write-Info "Building windsurf-cunzhi (MCP + UI)..."
+    
     $rustVersion = & rustc --version 2>$null
     if (-not $rustVersion) {
         Write-Err "Rust not found. Please install: https://rustup.rs"
@@ -58,19 +51,7 @@ if (-not $hasMcpExe -and -not $NoBuild) {
     }
     Write-Ok "Rust: $rustVersion"
     
-    Push-Location $scriptDir
-    try {
-        & cargo build --release
-        if ($LASTEXITCODE -ne 0) { Write-Err "Build failed"; exit 1 }
-        Write-Ok "MCP server build successful"
-        $hasMcpExe = $true
-    } finally { Pop-Location }
-}
-
-# 编译 Tauri UI
-if ($BuildTauri -and -not $hasTauriUi) {
-    Write-Info "Building Tauri UI..."
-    
+    # 检查 Node.js（构建前端）
     $npmVersion = & npm --version 2>$null
     if (-not $npmVersion) {
         Write-Err "Node.js/npm not found. Please install: https://nodejs.org"
@@ -82,22 +63,24 @@ if ($BuildTauri -and -not $hasTauriUi) {
     try {
         Write-Info "Installing npm dependencies..."
         & npm install
-        Write-Info "Building Tauri application..."
-        & npx tauri build
-        if ($LASTEXITCODE -ne 0) { Write-Err "Tauri build failed"; exit 1 }
-        Write-Ok "Tauri UI build successful"
-        $hasTauriUi = $true
+        
+        Write-Info "Building frontend..."
+        & npm run build
+        if ($LASTEXITCODE -ne 0) { Write-Err "Frontend build failed"; exit 1 }
+        
+        Write-Info "Building Tauri application (MCP + UI)..."
+        & cargo tauri build
+        if ($LASTEXITCODE -ne 0) { Write-Err "Build failed"; exit 1 }
+        Write-Ok "Build successful"
+        $hasMcpExe = $true
     } finally { Pop-Location }
 }
 
 # 验证必要文件
 if (-not (Test-Path $mcpExe)) {
-    Write-Err "MCP server not found. Run without -NoBuild to compile."
+    Write-Err "Executable not found. Run without -NoBuild to compile."
     exit 1
 }
-
-# 确定 UI 文件
-$uiExeSource = if ($hasTauriUi) { $tauriUiExe } else { $null }
 
 # 创建安装目录
 Write-Info "Install directory: $InstallPath"
@@ -108,12 +91,7 @@ if (-not (Test-Path $InstallPath)) {
 # 复制文件
 Write-Info "Copying files..."
 Copy-Item $mcpExe "$InstallPath\" -Force
-if ($uiExeSource) {
-    Copy-Item $uiExeSource "$InstallPath\windsurf-cunzhi-ui.exe" -Force
-    Write-Ok "Copied MCP server and UI"
-} else {
-    Write-Warn "UI not found, only MCP server installed"
-}
+Write-Ok "Copied windsurf-cunzhi.exe"
 
 # 添加到 PATH
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -258,24 +236,16 @@ Write-Ok "Installation complete!"
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Host "Installed files:" -ForegroundColor Yellow
-Write-Host "  - MCP server: $InstallPath\windsurf-cunzhi.exe" -ForegroundColor White
-if ($uiExeSource) {
-    Write-Host "  - Tauri UI:   $InstallPath\windsurf-cunzhi-ui.exe" -ForegroundColor White
-}
+Write-Host "  - windsurf-cunzhi.exe (MCP + UI)" -ForegroundColor White
+Write-Host "    Path: $InstallPath\windsurf-cunzhi.exe" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Configuration:" -ForegroundColor Yellow
 Write-Host "  - MCP config:    $windsurfConfigPath" -ForegroundColor White
 Write-Host "  - Global rules:  $globalRulesPath" -ForegroundColor White
 Write-Host ""
-Write-Host "Commands:" -ForegroundColor Yellow
-Write-Host "  windsurf-cunzhi      - MCP server" -ForegroundColor White
-if ($uiExeSource) {
-    Write-Host "  windsurf-cunzhi-ui   - Standalone UI test" -ForegroundColor White
-}
+Write-Host "Usage:" -ForegroundColor Yellow
+Write-Host "  windsurf-cunzhi        - Run as MCP server (default)" -ForegroundColor White
+Write-Host "  windsurf-cunzhi --ui   - Run UI mode directly" -ForegroundColor White
 Write-Host ""
 Write-Warn "Please restart Windsurf to apply changes!"
-Write-Host ""
-if (-not $hasTauriUi -and -not $BuildTauri) {
-    Write-Warn "Tip: Run with -BuildTauri to build the beautiful Tauri UI"
-}
 Write-Host ""

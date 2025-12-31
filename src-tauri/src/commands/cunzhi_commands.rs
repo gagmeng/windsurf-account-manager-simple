@@ -9,7 +9,7 @@ use tauri::Manager;
 use zip::ZipArchive;
 
 
-/// 获取 MCP 可执行文件名
+/// 获取 MCP 可执行文件名（单二进制，包含 MCP + UI）
 fn get_mcp_exe_name() -> &'static str {
     #[cfg(target_os = "windows")]
     { "windsurf-cunzhi.exe" }
@@ -17,12 +17,16 @@ fn get_mcp_exe_name() -> &'static str {
     { "windsurf-cunzhi" }
 }
 
-/// 获取 UI 可执行文件名
-fn get_ui_exe_name() -> &'static str {
+/// 获取平台特定的资源子目录名
+fn get_platform_subdir() -> &'static str {
     #[cfg(target_os = "windows")]
-    { "windsurf-cunzhi-ui.exe" }
-    #[cfg(not(target_os = "windows"))]
-    { "windsurf-cunzhi-ui" }
+    { "windows" }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    { "macos-arm64" }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    { "macos-x64" }
+    #[cfg(target_os = "linux")]
+    { "linux" }
 }
 
 /// 解压 zip 文件到指定目录
@@ -405,27 +409,26 @@ pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<
             .map_err(|e| format!("创建安装目录失败: {}", e))?;
     }
     
-    // 2. 从资源目录复制 MCP 服务器和 UI
-    // 资源目录结构（构建时只打包当前平台的文件）：
-    //   cunzhi/windsurf-cunzhi[.exe]
-    //   cunzhi/windsurf-cunzhi-ui[.exe]
+    // 2. 从资源目录复制 MCP 服务器（单二进制，包含 MCP + UI）
+    // 资源目录结构（按平台分目录）：
+    //   cunzhi/windows/windsurf-cunzhi.exe
+    //   cunzhi/macos-arm64/windsurf-cunzhi
+    //   cunzhi/macos-x64/windsurf-cunzhi
+    //   cunzhi/linux/windsurf-cunzhi
     let resource_dir = app_handle.path().resource_dir()
-        .map(|p: PathBuf| p.join("cunzhi"))
+        .map(|p: PathBuf| p.join("cunzhi").join(get_platform_subdir()))
         .unwrap_or_default();
     
     let mcp_exe_name = get_mcp_exe_name();
-    let ui_exe_name = get_ui_exe_name();
     
     println!("[Cunzhi] Resource dir: {:?}", resource_dir);
     
     let mcp_exe_dest = install_dir.join(mcp_exe_name);
-    let ui_exe_dest = install_dir.join(ui_exe_name);
     
     let mut mcp_installed = false;
-    let mut ui_installed = false;
     
-    // 2.1 复制 MCP 服务器
-    // 源路径: cunzhi/windsurf-cunzhi[.exe]
+    // 复制 MCP 服务器（单二进制）
+    // 源路径: cunzhi/{platform}/windsurf-cunzhi[.exe]
     let mcp_source = resource_dir.join(mcp_exe_name);
     
     println!("[Cunzhi] Looking for MCP at: {:?}", mcp_source);
@@ -444,8 +447,12 @@ pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<
         mcp_installed = true;
         println!("[Cunzhi] Installed MCP: {:?}", mcp_exe_dest);
     } else {
-        // 后备：递归搜索
-        if let Some(found) = find_executable_recursive(&resource_dir, "windsurf-cunzhi", Some("-ui")) {
+        // 后备：递归搜索（向上一级目录）
+        let fallback_dir = app_handle.path().resource_dir()
+            .map(|p: PathBuf| p.join("cunzhi"))
+            .unwrap_or_default();
+        
+        if let Some(found) = find_executable_recursive(&fallback_dir, "windsurf-cunzhi", None) {
             fs::copy(&found, &mcp_exe_dest)
                 .map_err(|e| format!("复制 MCP 服务器失败: {}", e))?;
             
@@ -460,47 +467,8 @@ pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<
         }
     }
     
-    // 2.2 复制 UI
-    // 源路径: cunzhi/windsurf-cunzhi-ui[.exe]
-    let ui_source = resource_dir.join(ui_exe_name);
-    
-    println!("[Cunzhi] Looking for UI at: {:?}", ui_source);
-    
-    if ui_source.exists() {
-        fs::copy(&ui_source, &ui_exe_dest)
-            .map_err(|e| format!("复制 UI 程序失败: {}", e))?;
-        
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&ui_exe_dest, fs::Permissions::from_mode(0o755)).ok();
-        }
-        
-        ui_installed = true;
-        println!("[Cunzhi] Installed UI: {:?}", ui_exe_dest);
-    } else {
-        // 后备：递归搜索
-        if let Some(found) = find_executable_recursive(&resource_dir, "windsurf-cunzhi-ui", None) {
-            fs::copy(&found, &ui_exe_dest)
-                .map_err(|e| format!("复制 UI 程序失败: {}", e))?;
-            
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&ui_exe_dest, fs::Permissions::from_mode(0o755)).ok();
-            }
-            
-            ui_installed = true;
-            println!("[Cunzhi] Installed UI (fallback): {:?}", ui_exe_dest);
-        }
-    }
-    
     if !mcp_installed {
-        return Err("找不到 MCP 源文件，请确保资源目录 cunzhi 存在".to_string());
-    }
-    
-    if !ui_installed {
-        println!("[Cunzhi] Warning: UI not installed (optional)");
+        return Err(format!("找不到 MCP 源文件，请确保资源目录 cunzhi/{} 存在", get_platform_subdir()));
     }
     
     // 3. 配置 MCP
@@ -640,35 +608,14 @@ pub async fn uninstall_cunzhi(windsurf_path: Option<String>) -> Result<serde_jso
         }
     }
     
-    // 3. 删除安装的可执行文件（跨平台）
+    // 3. 删除安装的可执行文件（单二进制）
     let mcp_exe = install_dir.join(get_mcp_exe_name());
-    let ui_exe = install_dir.join(get_ui_exe_name());
     
     if mcp_exe.exists() {
         if let Err(e) = fs::remove_file(&mcp_exe) {
             println!("[Cunzhi] Warning: Failed to delete MCP exe: {}", e);
         } else {
             println!("[Cunzhi] Deleted: {:?}", mcp_exe);
-        }
-    }
-    
-    if ui_exe.exists() {
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: 删除整个 .app 目录
-            if let Err(e) = fs::remove_dir_all(&ui_exe) {
-                println!("[Cunzhi] Warning: Failed to delete UI app: {}", e);
-            } else {
-                println!("[Cunzhi] Deleted: {:?}", ui_exe);
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if let Err(e) = fs::remove_file(&ui_exe) {
-                println!("[Cunzhi] Warning: Failed to delete UI exe: {}", e);
-            } else {
-                println!("[Cunzhi] Deleted: {:?}", ui_exe);
-            }
         }
     }
     

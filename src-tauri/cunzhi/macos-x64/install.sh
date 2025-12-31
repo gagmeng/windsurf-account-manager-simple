@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 # Windsurf Cunzhi MCP - Installation Script for macOS/Linux
+# Single binary mode: MCP + UI combined
 #
 # Usage:
 #   ./install.sh              # Install with default settings
@@ -58,16 +59,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Parse arguments
 NO_BUILD=false
 UNINSTALL=false
-BUILD_TAURI=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-build)
             NO_BUILD=true
-            shift
-            ;;
-        --build-tauri)
-            BUILD_TAURI=true
             shift
             ;;
         --uninstall)
@@ -125,23 +121,14 @@ if [ "$UNINSTALL" = true ]; then
     exit 0
 fi
 
-# Build MCP server
-build_mcp() {
-    info "Building MCP server..."
+# Build single binary (MCP + UI)
+build_app() {
+    info "Building windsurf-cunzhi (MCP + UI single binary)..."
     
     if ! command -v cargo &> /dev/null; then
         error "Cargo not found. Please install Rust: https://rustup.rs/"
         exit 1
     fi
-    
-    cd "$SCRIPT_DIR"
-    cargo build --release
-    ok "MCP server built successfully"
-}
-
-# Build Tauri UI
-build_tauri() {
-    info "Building Tauri UI..."
     
     if ! command -v npm &> /dev/null; then
         error "npm not found. Please install Node.js"
@@ -149,51 +136,34 @@ build_tauri() {
     fi
     
     cd "$SCRIPT_DIR"
+    
+    info "Installing npm dependencies..."
     npm install
-    npm run tauri build
-    ok "Tauri UI built successfully"
+    
+    info "Building frontend..."
+    npm run build
+    
+    info "Building Tauri application..."
+    npx tauri build --no-bundle
+    
+    ok "Build successful"
 }
 
-# Install files
+# Install files (single binary)
 install_files() {
     info "Installing files to $INSTALL_DIR..."
     
     mkdir -p "$INSTALL_DIR"
     
-    # Copy MCP server
+    # Copy single binary (MCP + UI)
     if [ -f "$SCRIPT_DIR/target/release/windsurf-cunzhi" ]; then
         cp "$SCRIPT_DIR/target/release/windsurf-cunzhi" "$INSTALL_DIR/"
         chmod +x "$INSTALL_DIR/windsurf-cunzhi"
-        ok "Installed MCP server"
+        ok "Installed windsurf-cunzhi (MCP + UI)"
     else
-        error "MCP server binary not found. Run without --no-build to compile."
+        error "Binary not found. Run without --no-build to compile."
         exit 1
     fi
-    
-    # Copy Tauri UI
-    case "$OS" in
-        macos)
-            if [ -d "$SCRIPT_DIR/src-tauri/target/release/bundle/macos/windsurf-cunzhi-ui.app" ]; then
-                cp -r "$SCRIPT_DIR/src-tauri/target/release/bundle/macos/windsurf-cunzhi-ui.app" "$INSTALL_DIR/"
-                ok "Installed Tauri UI (macOS app bundle)"
-            elif [ -f "$SCRIPT_DIR/src-tauri/target/release/windsurf-cunzhi-ui" ]; then
-                cp "$SCRIPT_DIR/src-tauri/target/release/windsurf-cunzhi-ui" "$INSTALL_DIR/"
-                chmod +x "$INSTALL_DIR/windsurf-cunzhi-ui"
-                ok "Installed Tauri UI"
-            else
-                warn "Tauri UI not found. Run with --build-tauri to compile."
-            fi
-            ;;
-        linux)
-            if [ -f "$SCRIPT_DIR/src-tauri/target/release/windsurf-cunzhi-ui" ]; then
-                cp "$SCRIPT_DIR/src-tauri/target/release/windsurf-cunzhi-ui" "$INSTALL_DIR/"
-                chmod +x "$INSTALL_DIR/windsurf-cunzhi-ui"
-                ok "Installed Tauri UI"
-            else
-                warn "Tauri UI not found. Run with --build-tauri to compile."
-            fi
-            ;;
-    esac
 }
 
 # Configure MCP
@@ -268,10 +238,7 @@ configure_rules() {
 # Main installation flow
 main() {
     if [ "$NO_BUILD" = false ]; then
-        build_mcp
-        if [ "$BUILD_TAURI" = true ]; then
-            build_tauri
-        fi
+        build_app
     fi
     
     install_files
@@ -284,8 +251,13 @@ main() {
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     info "Installation directory: $INSTALL_DIR"
+    info "  - windsurf-cunzhi (MCP + UI single binary)"
     info "MCP config: $MCP_CONFIG"
     info "Global rules: $GLOBAL_RULES"
+    echo ""
+    info "Usage:"
+    info "  windsurf-cunzhi        - Run as MCP server (default)"
+    info "  windsurf-cunzhi --ui   - Run UI mode directly"
     echo ""
     warn "Please restart Windsurf for changes to take effect."
     echo ""
