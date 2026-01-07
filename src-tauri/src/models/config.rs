@@ -122,6 +122,14 @@ pub struct Settings {
     pub proxy_url: Option<String>,  // 代理地址 (如 http://127.0.0.1:7890)
     #[serde(default, rename = "useLightweightApi")]
     pub use_lightweight_api: bool,  // 使用轻量级API(GetPlanStatus)获取配额信息，否则使用GetCurrentUser
+    #[serde(default = "default_subscription_plan", rename = "subscriptionPlan")]
+    pub subscription_plan: i32,  // 订阅计划: 1=Teams, 2=Pro
+    #[serde(default = "default_payment_period", rename = "paymentPeriod")]
+    pub payment_period: i32,  // 支付周期: 1=月付, 2=年付
+    #[serde(default, rename = "teamName")]
+    pub team_name: String,  // Teams 计划的团队名称
+    #[serde(default = "default_seat_count", rename = "seatCount")]
+    pub seat_count: i32,  // Teams 计划的席位数量
 }
 
 fn default_browser_mode() -> String {
@@ -134,6 +142,18 @@ fn default_card_bind_retry() -> i32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_subscription_plan() -> i32 {
+    2  // 默认 Pro 计划
+}
+
+fn default_payment_period() -> i32 {
+    1  // 默认月付
+}
+
+fn default_seat_count() -> i32 {
+    1  // 默认1个席位
 }
 
 impl Default for Settings {
@@ -167,6 +187,10 @@ impl Default for Settings {
             proxy_enabled: false,  // 默认关闭代理
             proxy_url: None,  // 默认无代理地址
             use_lightweight_api: false,  // 默认关闭轻量级API
+            subscription_plan: 2,  // 默认 Pro 计划
+            payment_period: 1,  // 默认月付
+            team_name: String::new(),  // 默认空团队名称
+            seat_count: 1,  // 默认1个席位
         }
     }
 }

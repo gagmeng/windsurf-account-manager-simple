@@ -935,14 +935,25 @@ pub async fn get_trial_payment_link_enhanced(
     data_store: State<'_, Arc<DataStore>>,
     account_name: String,
     token: String,
-    price_id: String,
     auto_open: bool,
+    teams_tier: i32,
+    payment_period: i32,
+    team_name: Option<String>,
+    seat_count: Option<i32>,
+    turnstile_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     // 获取WindsurfService实例
     let service = crate::services::windsurf_service::WindsurfService::new();
     
     // 调用subscribe_to_plan方法获取支付链接
-    let result = service.subscribe_to_plan(&token, &price_id)
+    let result = service.subscribe_to_plan(
+        &token, 
+        teams_tier,
+        payment_period,
+        team_name.as_deref(),
+        seat_count,
+        turnstile_token.as_deref()
+    )
         .await
         .map_err(|e| e.to_string())?;
     
@@ -979,7 +990,8 @@ pub async fn get_trial_payment_link_enhanced(
                 "window_opened": true,
                 "window_label": window_label,
                 "incognito_mode": true,  // 标记使用了无痕模式
-                "price_id": price_id,
+                "teams_tier": teams_tier,
+                "payment_period": payment_period,
                 "account_name": account_name,
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             }));

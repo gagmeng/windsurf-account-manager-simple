@@ -203,18 +203,30 @@ export const apiService = {
   /**
    * 获取试用绑卡链接
    * @param id 账号ID
-   * @param priceId 可选的Stripe价格ID，默认为Pro计划
+   * @param teamsTier 团队等级: 1=Teams, 2=Pro, 3=Enterprise
+   * @param paymentPeriod 支付周期: 1=月付, 2=年付
+   * @param teamName 团队名称 (仅 Teams/Enterprise 需要)
+   * @param seatCount 席位数量 (仅 Teams/Enterprise 需要)
+   * @param turnstileToken Turnstile 验证令牌 (Pro 需要)
    * @returns 包含Stripe Checkout链接的响应
    */
-  async getTrialPaymentLink(id: string, priceId?: string): Promise<{
+  async getTrialPaymentLink(
+    id: string, 
+    teamsTier?: number,
+    paymentPeriod?: number,
+    teamName?: string,
+    seatCount?: number,
+    turnstileToken?: string
+  ): Promise<{
     success: boolean;
     stripe_url?: string;
-    price_id?: string;
+    teams_tier?: number;
+    payment_period?: number;
     status_code?: number;
     error?: string;
     timestamp: string;
   }> {
-    return await invoke('get_trial_payment_link', { id, priceId });
+    return await invoke('get_trial_payment_link', { id, teamsTier, paymentPeriod, teamName, seatCount, turnstileToken });
   },
 
   // === Protobuf解析API（返回解析后的结构化数据） ===

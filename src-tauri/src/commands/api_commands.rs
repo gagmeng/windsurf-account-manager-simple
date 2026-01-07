@@ -1548,14 +1548,22 @@ async fn refresh_token_internal(
 ///
 /// # Arguments
 /// * `id` - 账号ID
-/// * `price_id` - 可选的Stripe价格ID，默认为Pro计划的价格ID
+/// * `teams_tier` - 团队等级: 1=Teams, 2=Pro, 3=Enterprise
+/// * `payment_period` - 支付周期: 1=月付, 2=年付
+/// * `team_name` - 团队名称 (仅 Teams/Enterprise 需要)
+/// * `seat_count` - 席位数量 (仅 Teams/Enterprise 需要)
+/// * `turnstile_token` - Turnstile 验证令牌 (Pro 需要)
 ///
 /// # Returns
 /// 返回包含Stripe Checkout链接的JSON对象
 #[tauri::command]
 pub async fn get_trial_payment_link(
     id: String,
-    price_id: Option<String>,
+    teams_tier: Option<i32>,
+    payment_period: Option<i32>,
+    team_name: Option<String>,
+    seat_count: Option<i32>,
+    turnstile_token: Option<String>,
     store: State<'_, Arc<DataStore>>,
 ) -> Result<serde_json::Value, String> {
     let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
@@ -1570,13 +1578,20 @@ pub async fn get_trial_payment_link(
 
     let token = account.token.ok_or("No token available")?;
 
-    // 使用默认的Pro计划价格ID，或使用用户提供的价格ID
-    let default_price_id = "price_1NuJObFKuRRGjKOFJVUbaIsJ";
-    let final_price_id = price_id.as_deref().unwrap_or(default_price_id);
+    // 默认值
+    let final_teams_tier = teams_tier.unwrap_or(2); // 默认 Pro
+    let final_payment_period = payment_period.unwrap_or(1); // 默认月付
 
     // 调用Windsurf API获取支付链接
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.subscribe_to_plan(&token, final_price_id)
+    let result = windsurf_service.subscribe_to_plan(
+        &token, 
+        final_teams_tier,
+        final_payment_period,
+        team_name.as_deref(),
+        seat_count,
+        turnstile_token.as_deref()
+    )
         .await
         .map_err(|e: AppError| e.to_string())?;
 
@@ -1584,19 +1599,24 @@ pub async fn get_trial_payment_link(
     let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
     let stripe_url = result.get("stripe_url").and_then(|v| v.as_str()).unwrap_or("");
 
+    let plan_name = if final_teams_tier == 1 { "Teams" } else { "Pro" };
+    let period_name = if final_payment_period == 1 { "月付" } else { "年付" };
+    
     let log = OperationLog::new(
         OperationType::GetAccountInfo, // 暂时使用GetAccountInfo类型，可以考虑添加新的类型
         if success { OperationStatus::Success } else { OperationStatus::Failed },
         format!(
-            "获取试用绑卡链接{}: {} (价格ID: {})",
+            "获取试用绑卡链接{}: {} (计划: {} {})",
             if success { "成功" } else { "失败" },
             account.email,
-            final_price_id
+            plan_name,
+            period_name
         ),
     )
     .with_account(uuid, account.email.clone())
     .with_details(json!({
-        "price_id": final_price_id,
+        "teams_tier": final_teams_tier,
+        "payment_period": final_payment_period,
         "stripe_url": stripe_url,
     }));
 

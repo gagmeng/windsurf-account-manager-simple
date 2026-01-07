@@ -322,6 +322,10 @@ export interface Settings {
   proxyEnabled?: boolean;  // 是否启用代理
   proxyUrl?: string | null;  // 代理地址 (如 http://127.0.0.1:7890)
   useLightweightApi?: boolean;  // 使用轻量级API(GetPlanStatus)获取配额信息
+  subscriptionPlan?: number;  // 订阅计划: 1=Teams, 2=Pro
+  paymentPeriod?: number;  // 支付周期: 1=月付, 2=年付
+  teamName?: string;  // Teams 计划的团队名称
+  seatCount?: number;  // Teams 计划的席位数量
 }
 
 /**

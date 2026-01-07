@@ -37,14 +37,22 @@ export async function validateCardNumber(cardNumber: string): Promise<boolean> {
 export async function getTrialPaymentLink(
   accountName: string,
   token: string,
-  priceId: string,
-  autoOpen: boolean
+  autoOpen: boolean,
+  teamsTier: number,
+  paymentPeriod: number,
+  teamName?: string,
+  seatCount?: number,
+  turnstileToken?: string
 ): Promise<any> {
   return await invoke('get_trial_payment_link_enhanced', {
     accountName,
     token,
-    priceId,
-    autoOpen
+    autoOpen,
+    teamsTier,
+    paymentPeriod,
+    teamName,
+    seatCount,
+    turnstileToken
   });
 }
 

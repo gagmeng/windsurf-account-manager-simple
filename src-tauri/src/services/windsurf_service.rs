@@ -200,11 +200,19 @@ impl WindsurfService {
         body
     }
 
-    fn build_subscribe_to_plan_body(&self, token: &str, price_id: &str, success_url: &str, cancel_url: &str) -> Vec<u8> {
+    fn build_subscribe_to_plan_body(
+        &self, 
+        token: &str, 
+        success_url: &str, 
+        cancel_url: &str, 
+        teams_tier: i32,
+        payment_period: i32,
+        team_name: Option<&str>,
+        seats: Option<i32>,
+        turnstile_token: Option<&str>
+    ) -> Vec<u8> {
         let token_bytes = token.as_bytes();
         let token_length = token_bytes.len();
-        let price_id_bytes = price_id.as_bytes();
-        let price_id_length = price_id_bytes.len();
         let success_url_bytes = success_url.as_bytes();
         let success_url_length = success_url_bytes.len();
         let cancel_url_bytes = cancel_url.as_bytes();
@@ -212,11 +220,8 @@ impl WindsurfService {
 
         let mut body = Vec::new();
 
-        // 字段1: Token (string, field number 1, wire type 2)
+        // 字段1: auth_token (string, field number 1, wire type 2)
         body.push(0x0a); // field 1, wire type 2 (length-delimited)
-
-        // Token长度（使用varint编码）
-        // 根据实际请求，token长度约为1000+字节，需要多字节varint编码
         let mut len = token_length;
         while len >= 0x80 {
             body.push(((len & 0x7F) | 0x80) as u8);
@@ -225,13 +230,11 @@ impl WindsurfService {
         body.push(len as u8);
         body.extend_from_slice(token_bytes);
 
-        // 字段2: Price ID (string, field number 2, wire type 2)
-        body.push(0x12); // field 2, wire type 2
-        body.push(price_id_length as u8);
-        body.extend_from_slice(price_id_bytes);
+        // 字段3: start_trial = true (bool, field number 3, wire type 0)
+        body.push(0x18); // field 3, wire type 0 (0x18 = (3 << 3) | 0)
+        body.push(0x01); // value = true
 
         // 字段4: Success URL (string, field number 4, wire type 2)
-        // 注意：跳过字段3，直接使用字段4
         body.push(0x22); // field 4, wire type 2 (0x22 = (4 << 3) | 2)
         body.push(success_url_length as u8);
         body.extend_from_slice(success_url_bytes);
@@ -241,13 +244,46 @@ impl WindsurfService {
         body.push(cancel_url_length as u8);
         body.extend_from_slice(cancel_url_bytes);
 
-        // 字段8: int值为2 (int32, field number 8, wire type 0)
-        body.push(0x40); // field 8, wire type 0 (varint)
-        body.push(0x02); // value = 2
+        // 字段6: seats (int64, field number 6, wire type 0)
+        // 只有 Teams/Enterprise 计划需要 seats，Pro 计划不能设置
+        if teams_tier == 1 || teams_tier == 3 {
+            let seat_count = seats.unwrap_or(1);
+            if seat_count > 0 {
+                body.push(0x30); // field 6, wire type 0 (0x30 = (6 << 3) | 0)
+                body.push(seat_count as u8);
+            }
+        }
 
-        // 字段9: bool值为true (bool, field number 9, wire type 0)
+        // 字段7: team_name (string, field number 7, wire type 2) - Teams/Enterprise 需要
+        if let Some(name) = team_name {
+            if !name.is_empty() {
+                let name_bytes = name.as_bytes();
+                body.push(0x3a); // field 7, wire type 2 (0x3a = (7 << 3) | 2)
+                body.push(name_bytes.len() as u8);
+                body.extend_from_slice(name_bytes);
+            }
+        }
+
+        // 字段8: teams_tier (enum, field number 8, wire type 0)
+        body.push(0x40); // field 8, wire type 0 (varint)
+        body.push(teams_tier as u8);
+
+        // 字段9: payment_period (enum, field number 9, wire type 0)
         body.push(0x48); // field 9, wire type 0 (varint)
-        body.push(0x01); // value = true
+        body.push(payment_period as u8);
+
+        // 字段10: turnstile_token (string, field number 10, wire type 2) - Pro 需要
+        if let Some(turnstile) = turnstile_token {
+            let turnstile_bytes = turnstile.as_bytes();
+            body.push(0x52); // field 10, wire type 2 (0x52 = (10 << 3) | 2)
+            let mut tlen = turnstile_bytes.len();
+            while tlen >= 0x80 {
+                body.push(((tlen & 0x7F) | 0x80) as u8);
+                tlen >>= 7;
+            }
+            body.push(tlen as u8);
+            body.extend_from_slice(turnstile_bytes);
+        }
 
         body
     }
@@ -1078,18 +1114,46 @@ impl WindsurfService {
     ///
     /// # Arguments
     /// * `token` - JWT token
-    /// * `price_id` - Stripe价格ID，例如 "price_1NuJObFKuRRGjKOFJVUbaIsJ"
+    /// * `teams_tier` - 团队等级: 1=Teams, 2=Pro, 3=Enterprise
+    /// * `payment_period` - 支付周期: 1=月付, 2=年付
+    /// * `team_name` - 团队名称 (仅 Teams/Enterprise 需要)
+    /// * `seats` - 席位数量 (仅 Teams/Enterprise 需要)
+    /// * `turnstile_token` - Turnstile 验证令牌 (Pro 需要)
     ///
     /// # Returns
     /// 返回包含Stripe Checkout链接的JSON对象
-    pub async fn subscribe_to_plan(&self, token: &str, price_id: &str) -> AppResult<serde_json::Value> {
+    pub async fn subscribe_to_plan(
+        &self, 
+        token: &str, 
+        teams_tier: i32,
+        payment_period: i32,
+        team_name: Option<&str>,
+        seats: Option<i32>,
+        turnstile_token: Option<&str>
+    ) -> AppResult<serde_json::Value> {
         let url = format!("{}/exa.seat_management_pb.SeatManagementService/SubscribeToPlan", WINDSURF_BASE_URL);
 
-        // 默认的回调URL
-        let success_url = "https://windsurf.com/billing/payment-success?plan_tier=pro";
-        let cancel_url = "https://windsurf.com/plan?plan_cancelled=true&plan_tier=pro";
+        // 调试日志
+        println!("[SubscribeToPlan] teams_tier={}, payment_period={}, team_name={:?}, seats={:?}, has_turnstile={}", 
+            teams_tier, payment_period, team_name, seats, turnstile_token.is_some());
 
-        let body = self.build_subscribe_to_plan_body(token, price_id, success_url, cancel_url);
+        // 根据计划类型设置回调URL
+        let plan_tier_str = if teams_tier == 1 { "teams" } else { "pro" };
+        let success_url = format!("https://windsurf.com/billing/payment-success?plan_tier={}", plan_tier_str);
+        let cancel_url = format!("https://windsurf.com/plan?plan_cancelled=true&plan_tier={}", plan_tier_str);
+
+        let body = self.build_subscribe_to_plan_body(
+            token, 
+            &success_url, 
+            &cancel_url, 
+            teams_tier,
+            payment_period,
+            team_name,
+            seats,
+            turnstile_token
+        );
+        
+        println!("[SubscribeToPlan] 请求体大小: {} bytes", body.len());
 
         let response = self.client
             .post(&url)
@@ -1117,6 +1181,8 @@ impl WindsurfService {
 
         let status_code = response.status().as_u16();
         let response_body = response.bytes().await?;
+        
+        println!("[SubscribeToPlan] 响应状态码: {}, 响应体大小: {} bytes", status_code, response_body.len());
 
         if status_code == 200 {
             // 响应直接是Protobuf二进制数据
@@ -1132,7 +1198,8 @@ impl WindsurfService {
                             "success": true,
                             "status_code": status_code,
                             "stripe_url": stripe_url,
-                            "price_id": price_id,
+                            "teams_tier": teams_tier,
+                            "payment_period": payment_period,
                             "timestamp": chrono::Utc::now().to_rfc3339(),
                         }));
                     } else {
@@ -1155,20 +1222,23 @@ impl WindsurfService {
             }
         } else {
             let error_msg = String::from_utf8_lossy(&response_body).to_string();
+            println!("[SubscribeToPlan] 错误响应: status={}, body={}", status_code, error_msg);
 
             // 解析错误信息，提供更友好的提示
             let friendly_error = if status_code == 400 {
                 if error_msg.contains("invalid_argument") {
-                    "请求参数错误，可能是价格ID无效或账号不支持此操作"
+                    "请求参数错误，可能是价格ID无效或账号不支持此操作".to_string()
+                } else if error_msg.contains("turnstile") || error_msg.contains("Turnstile") {
+                    "Turnstile 验证失败，请重新验证".to_string()
                 } else {
-                    "请求格式错误"
+                    format!("请求格式错误: {}", error_msg)
                 }
             } else if status_code == 401 || status_code == 403 {
-                "认证失败，请先刷新Token后重试"
+                "认证失败，请先刷新Token后重试".to_string()
             } else if status_code == 404 {
-                "API接口不存在"
+                "API接口不存在".to_string()
             } else {
-                "获取支付链接失败"
+                format!("获取支付链接失败: {}", error_msg)
             };
 
             Ok(serde_json::json!({

@@ -338,6 +338,14 @@
     :account="account"
     @success="handleUpdatePlanSuccess"
   />
+
+  <!-- Turnstile 验证对话框 -->
+  <TurnstileDialog
+    :visible="showTurnstileDialog"
+    @update:visible="showTurnstileDialog = $event"
+    @success="handleTurnstileSuccess"
+    @cancel="showTurnstileDialog = false"
+  />
 </template>
 
 <script setup lang="ts">
@@ -375,6 +383,7 @@ import TeamSettingsDialog from '@/components/TeamSettingsDialog.vue';
 import TeamManagementDialog from '@/components/TeamManagementDialog.vue';
 import AutoRefillDialog from '@/components/AutoRefillDialog.vue';
 import UpdatePlanDialog from '@/components/UpdatePlanDialog.vue';
+import TurnstileDialog from '@/components/TurnstileDialog.vue';
 import dayjs from 'dayjs';
 import { maskEmail } from '@/utils/privacy';
 
@@ -546,6 +555,8 @@ const showTeamSettingsDialog = ref(false);
 const showTeamManagementDialog = ref(false);
 const showAutoRefillDialog = ref(false);
 const showUpdatePlanDialog = ref(false);
+const showTurnstileDialog = ref(false);
+const pendingTurnstileToken = ref('');
 const seatsResultData = ref<any>(null);
 
 // 判断是否为付费计划（非 Free）
@@ -1129,10 +1140,34 @@ function handleUpdatePlanSuccess() {
   accountsStore.refreshAccountToken(props.account);
 }
 
-// 获取试用绑卡链接
-async function handleGetTrialLink() {
+// 获取试用绑卡链接 - 根据计划类型决定是否需要 Turnstile 验证
+function handleGetTrialLink() {
+  // 从设置中获取订阅计划类型
+  const teamsTier = settingsStore.settings?.subscriptionPlan ?? 2; // 默认 Pro
+  
+  // Pro 计划需要 Turnstile 验证，Teams 计划不需要
+  if (teamsTier === 2) {
+    showTurnstileDialog.value = true;
+  } else {
+    // Teams 计划直接调用，不需要 Turnstile
+    handleTurnstileSuccess('');
+  }
+}
+
+// Turnstile 验证成功后的处理
+async function handleTurnstileSuccess(turnstileToken: string) {
+  pendingTurnstileToken.value = turnstileToken;
+  showTurnstileDialog.value = false;
+  
   isGettingTrialLink.value = true;
   try {
+    // 从设置中读取订阅参数
+    const teamsTier = settingsStore.settings?.subscriptionPlan ?? 2; // 默认 Pro
+    const paymentPeriod = settingsStore.settings?.paymentPeriod ?? 1; // 默认月付
+    // Pro 计划不能设置团队名称，只有 Teams 才需要
+    const teamName = teamsTier === 1 ? (settingsStore.settings?.teamName || undefined) : undefined;
+    const seatCount = settingsStore.settings?.seatCount ?? 1;
+    
     // 检查是否启用了自动打开支付页面
     const autoOpen = settingsStore.settings?.autoOpenPaymentLinkInWebview || false;
     const autoFill = settingsStore.settings?.autoFillPaymentForm || false;
@@ -1153,14 +1188,15 @@ async function handleGetTrialLink() {
       // 使用增强的支付API
       const { getTrialPaymentLink, autoFillPaymentForm } = await import('@/utils/cardGenerator');
       
-      // 默认的价格ID（Pro计划试用）
-      const priceId = 'price_1NuJObFKuRRGjKOFJVUbaIsJ';
-      
       const result = await getTrialPaymentLink(
         account.nickname || account.email,
         account.token,
-        priceId,
-        true // 自动打开窗口
+        true, // 自动打开窗口
+        teamsTier,
+        paymentPeriod,
+        teamName,
+        teamsTier === 1 ? seatCount : undefined, // Teams 需要席位
+        turnstileToken || undefined // Pro 需要 Turnstile token
       );
       
       if (result.success && result.window_opened) {
@@ -1217,7 +1253,14 @@ async function handleGetTrialLink() {
       }
     } else {
       // 使用原有的API
-      const result = await apiService.getTrialPaymentLink(props.account.id);
+      const result = await apiService.getTrialPaymentLink(
+        props.account.id, 
+        teamsTier,
+        paymentPeriod,
+        teamName,
+        teamsTier === 1 ? seatCount : undefined,
+        turnstileToken || undefined
+      );
 
       if (result.success && result.stripe_url) {
         // 复制链接到剪贴板
