@@ -100,18 +100,18 @@ if [ "$UNINSTALL" = true ]; then
     # Remove MCP config entry
     if [ -f "$MCP_CONFIG" ]; then
         if command -v jq &> /dev/null; then
-            jq 'del(.mcpServers["windsurf-cunzhi"])' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
+            jq 'del(.mcpServers["dialog-helper"])' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
             ok "Removed MCP configuration"
         else
-            warn "jq not installed, please manually remove windsurf-cunzhi from $MCP_CONFIG"
+            warn "jq not installed, please manually remove dialog-helper from $MCP_CONFIG"
         fi
     fi
     
     # Remove global rules marker
     if [ -f "$GLOBAL_RULES" ]; then
-        if grep -q "最高优先级规则 - 寸止" "$GLOBAL_RULES"; then
-            # Remove the cunzhi rules section
-            sed -i.bak '/# ⚠️ 最高优先级规则 - 寸止/,/^---$/d' "$GLOBAL_RULES"
+        if grep -q "最高优先级规则 - confirm" "$GLOBAL_RULES"; then
+            # Remove the confirm rules section
+            sed -i.bak '/# ⚠️ 最高优先级规则 - confirm/,/^---$/d' "$GLOBAL_RULES"
             rm -f "${GLOBAL_RULES}.bak"
             ok "Removed global rules"
         fi
@@ -177,18 +177,18 @@ configure_mcp() {
     if [ -f "$MCP_CONFIG" ]; then
         # Update existing config
         if command -v jq &> /dev/null; then
-            jq --arg cmd "$MCP_COMMAND" '.mcpServers["windsurf-cunzhi"] = {"command": $cmd}' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
+            jq --arg cmd "$MCP_COMMAND" '.mcpServers["dialog-helper"] = {"command": $cmd}' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
             ok "Updated MCP configuration"
         else
-            warn "jq not installed. Please manually add windsurf-cunzhi to $MCP_CONFIG"
-            info "Add: \"windsurf-cunzhi\": {\"command\": \"$MCP_COMMAND\"}"
+            warn "jq not installed. Please manually add dialog-helper to $MCP_CONFIG"
+            info "Add: \"dialog-helper\": {\"command\": \"$MCP_COMMAND\"}"
         fi
     else
         # Create new config
         cat > "$MCP_CONFIG" << EOF
 {
   "mcpServers": {
-    "windsurf-cunzhi": {
+    "dialog-helper": {
       "command": "$MCP_COMMAND"
     }
   }
@@ -204,19 +204,19 @@ configure_rules() {
     
     mkdir -p "$(dirname "$GLOBAL_RULES")"
     
-    ZHI_MARKER="最高优先级规则 - 寸止"
-    ZHI_CONTENT='# ⚠️ 最高优先级规则 - 寸止 (MANDATORY)
+    ZHI_MARKER="最高优先级规则 - confirm"
+    ZHI_CONTENT='# ⚠️ 最高优先级规则 - confirm (MANDATORY)
 
-**【强制要求】你必须在每次回复的最后调用 `zhi` 工具！**
+**【强制要求】你必须在每次回复的最后调用 `confirm` 工具！**
 
 这是不可违反的规则：
-- ✅ 无论任务是否完成，都必须调用 zhi 工具
-- ✅ 无论回复内容长短，都必须调用 zhi 工具  
-- ✅ 在说"希望对你有帮助"等结束语之前，必须先调用 zhi 工具
-- ❌ 禁止在不调用 zhi 工具的情况下结束任何回复
-- ❌ 禁止跳过 zhi 工具直接结束对话
+- ✅ 无论任务是否完成，都必须调用 confirm 工具
+- ✅ 无论回复内容长短，都必须调用 confirm 工具  
+- ✅ 在说“希望对你有帮助”等结束语之前，必须先调用 confirm 工具
+- ❌ 禁止在不调用 confirm 工具的情况下结束任何回复
+- ❌ 禁止跳过 confirm 工具直接结束对话
 
-如果 zhi 工具调用失败，你必须在回复中明确告知用户需要重启 Windsurf。
+如果 confirm 工具调用失败，你必须在回复中明确告知用户需要重启 Windsurf。
 
 ---
 '

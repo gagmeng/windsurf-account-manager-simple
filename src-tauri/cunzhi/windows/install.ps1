@@ -133,18 +133,18 @@ if (Test-Path $windsurfConfigPath) {
     $mcpConfig = @{ mcpServers = @{} }
 }
 
-# 检查是否已配置 windsurf-cunzhi
-if (-not $mcpConfig.mcpServers.'windsurf-cunzhi') {
-    $mcpConfig.mcpServers | Add-Member -NotePropertyName "windsurf-cunzhi" -NotePropertyValue @{
+# 检查是否已配置 dialog-helper
+if (-not $mcpConfig.mcpServers.'dialog-helper') {
+    $mcpConfig.mcpServers | Add-Member -NotePropertyName "dialog-helper" -NotePropertyValue @{
         command = $mcpCommand
     } -Force
     $mcpConfigUpdated = $true
-    Write-Ok "Added windsurf-cunzhi to MCP config"
+    Write-Ok "Added dialog-helper to MCP config"
 } else {
     # 更新命令路径
-    $mcpConfig.mcpServers.'windsurf-cunzhi'.command = $mcpCommand
+    $mcpConfig.mcpServers.'dialog-helper'.command = $mcpCommand
     $mcpConfigUpdated = $true
-    Write-Info "Updated windsurf-cunzhi command path"
+    Write-Info "Updated dialog-helper command path"
 }
 
 # 保存 MCP 配置
@@ -154,7 +154,7 @@ if ($mcpConfigUpdated) {
 }
 
 # ============================================
-# 自动配置全局规则 (zhi 工具强制使用)
+# 自动配置全局规则 (confirm 工具强制使用)
 # ============================================
 $globalRulesDir = "$env:USERPROFILE\.codeium\windsurf\memories"
 $globalRulesPath = "$globalRulesDir\global_rules.md"
@@ -166,21 +166,21 @@ if (-not (Test-Path $globalRulesDir)) {
     New-Item -ItemType Directory -Path $globalRulesDir -Force | Out-Null
 }
 
-# 寸止规则内容
-$zhiRuleMarker = "最高优先级规则 - 寸止"
+# confirm 规则内容
+$zhiRuleMarker = "最高优先级规则 - confirm"
 $zhiRuleContent = @"
-# ⚠️ 最高优先级规则 - 寸止 (MANDATORY)
+# ⚠️ 最高优先级规则 - confirm (MANDATORY)
 
-**【强制要求】你必须在每次回复的最后调用 ``zhi`` 工具！**
+**【强制要求】你必须在每次回复的最后调用 ``confirm`` 工具！**
 
 这是不可违反的规则：
-- ✅ 无论任务是否完成，都必须调用 zhi 工具
-- ✅ 无论回复内容长短，都必须调用 zhi 工具  
-- ✅ 在说"希望对你有帮助"等结束语之前，必须先调用 zhi 工具
-- ❌ 禁止在不调用 zhi 工具的情况下结束任何回复
-- ❌ 禁止跳过 zhi 工具直接结束对话
+- ✅ 无论任务是否完成，都必须调用 confirm 工具
+- ✅ 无论回复内容长短，都必须调用 confirm 工具  
+- ✅ 在说“希望对你有帮助”等结束语之前，必须先调用 confirm 工具
+- ❌ 禁止在不调用 confirm 工具的情况下结束任何回复
+- ❌ 禁止跳过 confirm 工具直接结束对话
 
-如果 zhi 工具调用失败，你必须在回复中明确告知用户需要重启 Windsurf。
+如果 confirm 工具调用失败，你必须在回复中明确告知用户需要重启 Windsurf。
 
 ---
 "@
@@ -208,9 +208,9 @@ if (Test-Path $globalRulesPath) {
             ($zhiRuleContent + "`n`n" + $existingRules) | Set-Content $globalRulesPath -Encoding UTF8
         }
         $rulesUpdated = $true
-        Write-Ok "Added zhi tool rule to global_rules.md"
+        Write-Ok "Added confirm tool rule to global_rules.md"
     } else {
-        Write-Info "Zhi tool rule already exists in global_rules.md"
+        Write-Info "Confirm tool rule already exists in global_rules.md"
     }
 } else {
     # 创建新的全局规则文件
@@ -224,7 +224,7 @@ $zhiRuleContent
 "@
     $defaultRules | Set-Content $globalRulesPath -Encoding UTF8
     $rulesUpdated = $true
-    Write-Ok "Created global_rules.md with zhi tool rule"
+    Write-Ok "Created global_rules.md with confirm tool rule"
 }
 
 # ============================================

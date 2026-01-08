@@ -332,21 +332,21 @@ fn get_global_rules_path() -> PathBuf {
 }
 
 /// 寸止规则标记
-const ZHI_RULE_MARKER: &str = "最高优先级规则 - 寸止";
+const ZHI_RULE_MARKER: &str = "最高优先级规则 - confirm";
 
 /// 寸止规则内容
-const ZHI_RULE_CONTENT: &str = r#"# ⚠️ 最高优先级规则 - 寸止 (MANDATORY)
+const ZHI_RULE_CONTENT: &str = r#"# ⚠️ 最高优先级规则 - confirm (MANDATORY)
 
-**【强制要求】你必须在每次回复的最后调用 `zhi` 工具！**
+**【强制要求】你必须在每次回复的最后调用 `confirm` 工具！**
 
 这是不可违反的规则：
-- ✅ 无论任务是否完成，都必须调用 zhi 工具
-- ✅ 无论回复内容长短，都必须调用 zhi 工具  
-- ✅ 在说"希望对你有帮助"等结束语之前，必须先调用 zhi 工具
-- ❌ 禁止在不调用 zhi 工具的情况下结束任何回复
-- ❌ 禁止跳过 zhi 工具直接结束对话
+- 无论任务是否完成，都必须调用 confirm 工具
+- 无论回复内容长短，都必须调用 confirm 工具  
+- 在说“希望对你有帮助”等结束语之前，必须先调用 confirm 工具
+- 禁止在不调用 confirm 工具的情况下结束任何回复
+- 禁止跳过 confirm 工具直接结束对话
 
-如果 zhi 工具调用失败，你必须在回复中明确告知用户需要重启 Windsurf。
+如果 confirm 工具调用失败，你必须在回复中明确告知用户需要重启 Windsurf。
 
 ---
 "#;
@@ -365,7 +365,7 @@ pub async fn check_cunzhi_status() -> Result<serde_json::Value, String> {
     // 检查 MCP 配置是否存在
     let mcp_configured = if mcp_config_path.exists() {
         if let Ok(content) = fs::read_to_string(&mcp_config_path) {
-            content.contains("windsurf-cunzhi")
+            content.contains("dialog-helper")
         } else {
             false
         }
@@ -491,7 +491,16 @@ pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<
         mcp_config["mcpServers"] = json!({});
     }
     
-    mcp_config["mcpServers"]["windsurf-cunzhi"] = json!({
+    // 删除旧的 windsurf-cunzhi 配置
+    if let Some(servers) = mcp_config.get_mut("mcpServers") {
+        if let Some(obj) = servers.as_object_mut() {
+            if obj.remove("windsurf-cunzhi").is_some() {
+                println!("[Cunzhi] Removed old windsurf-cunzhi config");
+            }
+        }
+    }
+    
+    mcp_config["mcpServers"]["dialog-helper"] = json!({
         "command": mcp_exe_dest.to_string_lossy()
     });
     
@@ -506,13 +515,47 @@ pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<
     }
     
     if global_rules_path.exists() {
-        let existing_rules = fs::read_to_string(&global_rules_path)
+        let mut existing_rules = fs::read_to_string(&global_rules_path)
             .map_err(|e| format!("读取全局规则失败: {}", e))?;
+        
+        // 删除旧的 寸止 规则
+        const OLD_ZHI_MARKER: &str = "最高优先级规则 - 寸止";
+        if existing_rules.contains(OLD_ZHI_MARKER) {
+            let lines: Vec<&str> = existing_rules.lines().collect();
+            let mut new_lines: Vec<&str> = Vec::new();
+            let mut skip_until_divider = false;
+            
+            for line in lines {
+                if line.contains(OLD_ZHI_MARKER) {
+                    skip_until_divider = true;
+                    continue;
+                }
+                if skip_until_divider {
+                    if line.starts_with("---") {
+                        skip_until_divider = false;
+                    }
+                    continue;
+                }
+                new_lines.push(line);
+            }
+            
+            // 清理开头的空行
+            while !new_lines.is_empty() && new_lines[0].trim().is_empty() {
+                new_lines.remove(0);
+            }
+            
+            existing_rules = new_lines.join("\n");
+            println!("[Cunzhi] Removed old 寸止 rules");
+        }
         
         if !existing_rules.contains(ZHI_RULE_MARKER) {
             // 在文件开头添加规则
             let new_content = format!("{}\n\n{}", ZHI_RULE_CONTENT, existing_rules);
             fs::write(&global_rules_path, new_content)
+                .map_err(|e| format!("保存全局规则失败: {}", e))?;
+        } else {
+            // 规则已存在，只需保存清理后的内容
+            fs::write(&global_rules_path, existing_rules)
                 .map_err(|e| format!("保存全局规则失败: {}", e))?;
         }
     } else {
@@ -555,7 +598,7 @@ pub async fn uninstall_cunzhi(windsurf_path: Option<String>) -> Result<serde_jso
         println!("[Cunzhi] Warning: Failed to kill Windsurf: {}", e);
     }
     
-    // 1. 从 MCP 配置中移除
+    // 1. 从 MCP 配置中移除（包括新旧配置）
     if mcp_config_path.exists() {
         let content = fs::read_to_string(&mcp_config_path)
             .map_err(|e| format!("读取 MCP 配置失败: {}", e))?;
@@ -563,6 +606,9 @@ pub async fn uninstall_cunzhi(windsurf_path: Option<String>) -> Result<serde_jso
         if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(servers) = config.get_mut("mcpServers") {
                 if let Some(obj) = servers.as_object_mut() {
+                    // 移除新配置
+                    obj.remove("dialog-helper");
+                    // 移除旧配置
                     obj.remove("windsurf-cunzhi");
                 }
             }
@@ -572,19 +618,22 @@ pub async fn uninstall_cunzhi(windsurf_path: Option<String>) -> Result<serde_jso
         }
     }
     
-    // 2. 从全局规则中移除寸止规则
+    // 2. 从全局规则中移除寸止规则（包括新旧规则）
     if global_rules_path.exists() {
         let content = fs::read_to_string(&global_rules_path)
             .map_err(|e| format!("读取全局规则失败: {}", e))?;
         
-        if content.contains(ZHI_RULE_MARKER) {
-            // 移除寸止规则部分
+        // 需要移除的规则标记（新旧两种）
+        const OLD_ZHI_MARKER: &str = "最高优先级规则 - 寸止";
+        
+        if content.contains(ZHI_RULE_MARKER) || content.contains(OLD_ZHI_MARKER) {
             let lines: Vec<&str> = content.lines().collect();
             let mut new_lines: Vec<&str> = Vec::new();
             let mut skip_until_divider = false;
             
             for line in lines {
-                if line.contains(ZHI_RULE_MARKER) {
+                // 检查新旧两种规则标记
+                if line.contains(ZHI_RULE_MARKER) || line.contains(OLD_ZHI_MARKER) {
                     skip_until_divider = true;
                     continue;
                 }
