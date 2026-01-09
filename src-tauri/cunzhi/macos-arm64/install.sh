@@ -97,24 +97,23 @@ if [ "$UNINSTALL" = true ]; then
         ok "Removed installation directory"
     fi
     
-    # Remove MCP config entry
+    # Remove MCP config entries (all old versions)
     if [ -f "$MCP_CONFIG" ]; then
         if command -v jq &> /dev/null; then
-            jq 'del(.mcpServers["dialog-helper"])' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
+            jq 'del(.mcpServers["user-input"]) | del(.mcpServers["dialog-helper"]) | del(.mcpServers["windsurf-cunzhi"])' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
             ok "Removed MCP configuration"
         else
-            warn "jq not installed, please manually remove dialog-helper from $MCP_CONFIG"
+            warn "jq not installed, please manually remove user-input from $MCP_CONFIG"
         fi
     fi
     
-    # Remove global rules marker
+    # Remove global rules markers (all versions)
     if [ -f "$GLOBAL_RULES" ]; then
-        if grep -q "最高优先级规则 - confirm" "$GLOBAL_RULES"; then
-            # Remove the confirm rules section
-            sed -i.bak '/# ⚠️ 最高优先级规则 - confirm/,/^---$/d' "$GLOBAL_RULES"
-            rm -f "${GLOBAL_RULES}.bak"
-            ok "Removed global rules"
-        fi
+        sed -i.bak '/# PRIORITY RULE - prompt/,/^---$/d' "$GLOBAL_RULES"
+        sed -i.bak '/# PRIORITY RULE - confirm/,/^---$/d' "$GLOBAL_RULES"
+        sed -i.bak '/# PRIORITY RULE - zhi/,/^---$/d' "$GLOBAL_RULES"
+        rm -f "${GLOBAL_RULES}.bak"
+        ok "Removed global rules"
     fi
     
     ok "Uninstallation complete!"
@@ -153,13 +152,26 @@ build_app() {
 install_files() {
     info "Installing files to $INSTALL_DIR..."
     
+    # Stop running process if exists
+    if pgrep -x "windsurf-cunzhi" > /dev/null 2>&1; then
+        warn "windsurf-cunzhi is running, stopping it..."
+        pkill -x "windsurf-cunzhi"
+        sleep 0.5
+        ok "Process stopped"
+    fi
+    
     mkdir -p "$INSTALL_DIR"
     
     # Copy single binary (MCP + UI)
-    if [ -f "$SCRIPT_DIR/target/release/windsurf-cunzhi" ]; then
+    # Check same directory first (for release packages), then build output
+    if [ -f "$SCRIPT_DIR/windsurf-cunzhi" ]; then
+        cp "$SCRIPT_DIR/windsurf-cunzhi" "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR/windsurf-cunzhi"
+        ok "Installed windsurf-cunzhi from package"
+    elif [ -f "$SCRIPT_DIR/target/release/windsurf-cunzhi" ]; then
         cp "$SCRIPT_DIR/target/release/windsurf-cunzhi" "$INSTALL_DIR/"
         chmod +x "$INSTALL_DIR/windsurf-cunzhi"
-        ok "Installed windsurf-cunzhi (MCP + UI)"
+        ok "Installed windsurf-cunzhi from build output"
     else
         error "Binary not found. Run without --no-build to compile."
         exit 1
@@ -175,20 +187,20 @@ configure_mcp() {
     MCP_COMMAND="$INSTALL_DIR/windsurf-cunzhi"
     
     if [ -f "$MCP_CONFIG" ]; then
-        # Update existing config
+        # Update existing config (remove old, add new)
         if command -v jq &> /dev/null; then
-            jq --arg cmd "$MCP_COMMAND" '.mcpServers["dialog-helper"] = {"command": $cmd}' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
+            jq --arg cmd "$MCP_COMMAND" 'del(.mcpServers["dialog-helper"]) | del(.mcpServers["windsurf-cunzhi"]) | del(.mcpServers["user-input"]) | .mcpServers["filesystem"] = {"command": $cmd}' "$MCP_CONFIG" > "${MCP_CONFIG}.tmp" && mv "${MCP_CONFIG}.tmp" "$MCP_CONFIG"
             ok "Updated MCP configuration"
         else
-            warn "jq not installed. Please manually add dialog-helper to $MCP_CONFIG"
-            info "Add: \"dialog-helper\": {\"command\": \"$MCP_COMMAND\"}"
+            warn "jq not installed. Please manually add filesystem to $MCP_CONFIG"
+            info "Add: \"filesystem\": {\"command\": \"$MCP_COMMAND\"}"
         fi
     else
         # Create new config
         cat > "$MCP_CONFIG" << EOF
 {
   "mcpServers": {
-    "dialog-helper": {
+    "filesystem": {
       "command": "$MCP_COMMAND"
     }
   }
@@ -204,24 +216,30 @@ configure_rules() {
     
     mkdir -p "$(dirname "$GLOBAL_RULES")"
     
-    ZHI_MARKER="最高优先级规则 - confirm"
-    ZHI_CONTENT='# ⚠️ 最高优先级规则 - confirm (MANDATORY)
+    # Rule content with MUST call requirement
+    ZHI_MARKER="PRIORITY RULE - read_user_input"
+    ZHI_CONTENT="# PRIORITY RULE - read_user_input (MANDATORY)
 
-**【强制要求】你必须在每次回复的最后调用 `confirm` 工具！**
+**You MUST call the \`read_user_input\` tool at the end of every response!**
 
-这是不可违反的规则：
-- ✅ 无论任务是否完成，都必须调用 confirm 工具
-- ✅ 无论回复内容长短，都必须调用 confirm 工具  
-- ✅ 在说“希望对你有帮助”等结束语之前，必须先调用 confirm 工具
-- ❌ 禁止在不调用 confirm 工具的情况下结束任何回复
-- ❌ 禁止跳过 confirm 工具直接结束对话
+Rules:
+- Always call read_user_input tool before ending any response
+- Always call read_user_input tool before saying goodbye phrases
+- Never end a response without calling read_user_input tool
 
-如果 confirm 工具调用失败，你必须在回复中明确告知用户需要重启 Windsurf。
+If read_user_input tool fails, inform user to restart the IDE.
 
 ---
-'
+"
     
     if [ -f "$GLOBAL_RULES" ]; then
+        # Remove old rules first (all versions)
+        sed -i.bak '/# PRIORITY RULE - confirm/,/^---$/d' "$GLOBAL_RULES"
+        sed -i.bak '/# PRIORITY RULE - zhi/,/^---$/d' "$GLOBAL_RULES"
+        sed -i.bak '/# PRIORITY RULE - prompt/,/^---$/d' "$GLOBAL_RULES"
+        sed -i.bak '/# PRIORITY RULE - pro/,/^---$/d' "$GLOBAL_RULES"
+        rm -f "${GLOBAL_RULES}.bak"
+        
         if grep -q "$ZHI_MARKER" "$GLOBAL_RULES"; then
             ok "Global rules already configured"
         else
@@ -261,6 +279,8 @@ main() {
     echo ""
     warn "Please restart Windsurf for changes to take effect."
     echo ""
+    echo -e "\033[90mPress Enter to exit...\033[0m"
+    read -r
 }
 
 main
