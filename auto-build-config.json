@@ -1,0 +1,63 @@
+{
+  "autoTrigger": {
+    "enabled": true,
+    "watchPaths": [
+      "src/**/*",
+      "src-tauri/**/*",
+      "package.json",
+      "vite.config.ts",
+      "tsconfig.json"
+    ],
+    "ignorePaths": [
+      "node_modules/**",
+      "target/**",
+      "dist/**",
+      ".git/**",
+      "**/*.log",
+      "**/*.tmp"
+    ],
+    "fileExtensions": [
+      ".ts",
+      ".js",
+      ".vue",
+      ".rs",
+      ".json",
+      ".toml",
+      ".html",
+      ".css",
+      ".scss"
+    ],
+    "buildCooldown": 5,
+    "buildTarget": "admin"
+  },
+  "buildTargets": {
+    "dev": {
+      "command": "npm run dev",
+      "description": "Start development server"
+    },
+    "web": {
+      "command": "npm run build",
+      "description": "Build web version"
+    },
+    "tauri": {
+      "command": "npm run tauri build",
+      "description": "Build Tauri application"
+    },
+    "admin": {
+      "command": "./build_with_admin.bat",
+      "description": "Build application with admin privileges"
+    }
+  },
+  "notifications": {
+    "enabled": true,
+    "showBuildStart": true,
+    "showBuildComplete": true,
+    "showBuildError": true
+  },
+  "github": {
+    "autoCommit": false,
+    "commitMessage": "Auto build: {timestamp}",
+    "autoPush": false,
+    "createPR": false
+  }
+}
