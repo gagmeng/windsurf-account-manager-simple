@@ -44,6 +44,24 @@ pub struct Account {
     // 是否为团队所有者（Admin角色，有团队成员的主账号）
     #[serde(default)]
     pub is_team_owner: Option<bool>,
+    // 计费策略 (0=UNSPECIFIED, 1=CREDITS, 2=QUOTA, 3=ACU)
+    #[serde(default)]
+    pub billing_strategy: Option<i32>,
+    // 日配额剩余百分比 (0-100，仅 billing_strategy=2(QUOTA) 时有效)
+    #[serde(default)]
+    pub daily_quota_remaining_percent: Option<i32>,
+    // 周配额剩余百分比 (0-100，仅 billing_strategy=2(QUOTA) 时有效)
+    #[serde(default)]
+    pub weekly_quota_remaining_percent: Option<i32>,
+    // 日配额重置时间 (Unix时间戳秒)
+    #[serde(default)]
+    pub daily_quota_reset_at_unix: Option<i64>,
+    // 周配额重置时间 (Unix时间戳秒)
+    #[serde(default)]
+    pub weekly_quota_reset_at_unix: Option<i64>,
+    // 额外使用余额 (微美元，除以1e6得到美元)
+    #[serde(default)]
+    pub overage_balance_micros: Option<i64>,
     // 自定义排序顺序（用于拖拽排序）
     #[serde(default, rename = "sortOrder")]
     pub sort_order: i32,
@@ -83,6 +101,12 @@ impl Account {
             windsurf_api_key: None,
             is_disabled: None,
             is_team_owner: None,
+            billing_strategy: None,
+            daily_quota_remaining_percent: None,
+            weekly_quota_remaining_percent: None,
+            daily_quota_reset_at_unix: None,
+            weekly_quota_reset_at_unix: None,
+            overage_balance_micros: None,
             sort_order: 0,
         }
     }

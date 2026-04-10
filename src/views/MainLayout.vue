@@ -892,6 +892,12 @@ async function refreshAccounts() {
               account.subscription_expires_at = dayjs.unix(item.data.subscription_expires_at).toISOString();
             }
             if (item.data.last_quota_update) account.last_quota_update = item.data.last_quota_update;
+            if (item.data.billing_strategy !== undefined) account.billing_strategy = item.data.billing_strategy;
+            if (item.data.daily_quota_remaining_percent !== undefined) account.daily_quota_remaining_percent = item.data.daily_quota_remaining_percent;
+            if (item.data.weekly_quota_remaining_percent !== undefined) account.weekly_quota_remaining_percent = item.data.weekly_quota_remaining_percent;
+            if (item.data.daily_quota_reset_at_unix !== undefined) account.daily_quota_reset_at_unix = item.data.daily_quota_reset_at_unix;
+            if (item.data.weekly_quota_reset_at_unix !== undefined) account.weekly_quota_reset_at_unix = item.data.weekly_quota_reset_at_unix;
+            if (item.data.overage_balance_micros !== undefined) account.overage_balance_micros = item.data.overage_balance_micros;
             account.status = 'active';
           } else {
             accountsStore.accounts[idx].status = 'error';
@@ -1330,26 +1336,31 @@ async function handleBatchRefresh() {
     // 刷新成功的账号，从后端重新获取数据更新 store
     if (result.results) {
       for (const item of result.results) {
+        const idx = accountsStore.accounts.findIndex(a => a.id === item.id);
+        if (idx === -1) continue;
+        
         if (item.success && item.data) {
-          // 从后端获取最新账号数据
-          try {
-            const latestAccount = await accountApi.getAccount(item.id);
-            if (item.data.plan_name) latestAccount.plan_name = item.data.plan_name;
-            if (item.data.used_quota !== undefined) latestAccount.used_quota = item.data.used_quota;
-            if (item.data.total_quota !== undefined) latestAccount.total_quota = item.data.total_quota;
-            if (item.data.expires_at) latestAccount.token_expires_at = item.data.expires_at;
-            latestAccount.status = 'active';
-            latestAccount.last_quota_update = dayjs().toISOString();
-            accountsStore.updateAccount(latestAccount);
-          } catch {
-            // 忽略单个账号的获取失败
+          const account = accountsStore.accounts[idx];
+          if (item.data.plan_name) account.plan_name = item.data.plan_name;
+          if (item.data.used_quota !== undefined) account.used_quota = item.data.used_quota;
+          if (item.data.total_quota !== undefined) account.total_quota = item.data.total_quota;
+          if (item.data.expires_at) account.token_expires_at = item.data.expires_at;
+          if (item.data.windsurf_api_key) account.windsurf_api_key = item.data.windsurf_api_key;
+          if (item.data.is_disabled !== undefined) account.is_disabled = item.data.is_disabled;
+          if (item.data.subscription_active !== undefined) account.subscription_active = item.data.subscription_active;
+          if (item.data.subscription_expires_at && typeof item.data.subscription_expires_at === 'number' && item.data.subscription_expires_at > 0) {
+            account.subscription_expires_at = dayjs.unix(item.data.subscription_expires_at).toISOString();
           }
+          if (item.data.last_quota_update) account.last_quota_update = item.data.last_quota_update;
+          if (item.data.billing_strategy !== undefined) account.billing_strategy = item.data.billing_strategy;
+          if (item.data.daily_quota_remaining_percent !== undefined) account.daily_quota_remaining_percent = item.data.daily_quota_remaining_percent;
+          if (item.data.weekly_quota_remaining_percent !== undefined) account.weekly_quota_remaining_percent = item.data.weekly_quota_remaining_percent;
+          if (item.data.daily_quota_reset_at_unix !== undefined) account.daily_quota_reset_at_unix = item.data.daily_quota_reset_at_unix;
+          if (item.data.weekly_quota_reset_at_unix !== undefined) account.weekly_quota_reset_at_unix = item.data.weekly_quota_reset_at_unix;
+          if (item.data.overage_balance_micros !== undefined) account.overage_balance_micros = item.data.overage_balance_micros;
+          account.status = 'active';
         } else {
-          // 刷新失败的账号，标记为 error
-          const account = accountsStore.accounts.find(a => a.id === item.id);
-          if (account) {
-            accountsStore.updateAccount({ ...account, status: 'error' as const });
-          }
+          accountsStore.accounts[idx].status = 'error';
         }
       }
     }

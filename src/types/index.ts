@@ -98,6 +98,18 @@ export interface Account {
   is_disabled?: boolean;
   // 是否为团队所有者（Admin角色，有团队成员的主账号）
   is_team_owner?: boolean;
+  // 计费策略 (0=UNSPECIFIED, 1=CREDITS, 2=QUOTA, 3=ACU)
+  billing_strategy?: number;
+  // 日配额剩余百分比 (0-100，仅 billing_strategy=2(QUOTA) 时有效)
+  daily_quota_remaining_percent?: number;
+  // 周配额剩余百分比 (0-100，仅 billing_strategy=2(QUOTA) 时有效)
+  weekly_quota_remaining_percent?: number;
+  // 日配额重置时间 (Unix时间戳秒)
+  daily_quota_reset_at_unix?: number;
+  // 周配额重置时间 (Unix时间戳秒)
+  weekly_quota_reset_at_unix?: number;
+  // 额外使用余额 (微美元，除以1e6得到美元)
+  overage_balance_micros?: number;
   // 自定义排序顺序（用于拖拽排序）
   sortOrder?: number;
 }

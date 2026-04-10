@@ -39,6 +39,55 @@ pub fn is_401_error(result: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// 将 GetPlanStatus 返回的 plan_status JSON 应用到 Account 结构体
+pub fn apply_plan_status_to_account(plan_status: &serde_json::Value, account: &mut crate::models::account::Account) {
+    // 更新套餐名称
+    if let Some(plan_name) = plan_status.get("plan_name").and_then(|v| v.as_str()) {
+        account.plan_name = Some(plan_name.to_string());
+    }
+    
+    // 更新已用配额 (used_prompt_credits + used_flex_credits)
+    let used_prompt = plan_status.get("used_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
+    let used_flex = plan_status.get("used_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
+    account.used_quota = Some((used_prompt + used_flex) as i32);
+    
+    // 更新总配额 (available_flex_credits + available_prompt_credits)
+    let available_flex = plan_status.get("available_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
+    let available_prompt = plan_status.get("available_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
+    if available_flex > 0 || available_prompt > 0 {
+        account.total_quota = Some((available_flex + available_prompt) as i32);
+    }
+    
+    // 更新订阅到期时间 (plan_end)
+    if let Some(plan_end) = plan_status.get("plan_end").and_then(|v| v.as_i64()) {
+        account.subscription_expires_at = chrono::DateTime::from_timestamp(plan_end, 0);
+    }
+    
+    // 更新计费策略
+    if let Some(bs) = plan_status.get("billing_strategy").and_then(|v| v.as_i64()) {
+        account.billing_strategy = Some(bs as i32);
+    }
+    
+    // 更新日/周配额百分比
+    if let Some(v) = plan_status.get("daily_quota_remaining_percent").and_then(|v| v.as_i64()) {
+        account.daily_quota_remaining_percent = Some(v as i32);
+    }
+    if let Some(v) = plan_status.get("weekly_quota_remaining_percent").and_then(|v| v.as_i64()) {
+        account.weekly_quota_remaining_percent = Some(v as i32);
+    }
+    if let Some(v) = plan_status.get("daily_quota_reset_at_unix").and_then(|v| v.as_i64()) {
+        account.daily_quota_reset_at_unix = Some(v);
+    }
+    if let Some(v) = plan_status.get("weekly_quota_reset_at_unix").and_then(|v| v.as_i64()) {
+        account.weekly_quota_reset_at_unix = Some(v);
+    }
+    if let Some(v) = plan_status.get("overage_balance_micros").and_then(|v| v.as_i64()) {
+        account.overage_balance_micros = Some(v);
+    }
+    
+    account.last_quota_update = Some(chrono::Utc::now());
+}
+
 /// 确保账户有有效的Token（支持强制刷新）
 /// force_refresh: 强制刷新token，用于处理服务器端使token失效的情况（如401错误）
 pub async fn ensure_valid_token_with_force(
@@ -139,30 +188,7 @@ pub async fn login_account(
         if let Ok(result) = windsurf_service.get_plan_status(&token).await {
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(plan_status) = result.get("plan_status") {
-                    // 更新套餐名称
-                    if let Some(plan_name) = plan_status.get("plan_name").and_then(|v| v.as_str()) {
-                        updated_account.plan_name = Some(plan_name.to_string());
-                    }
-                    
-                    // 更新已用配额 (used_prompt_credits + used_flex_credits)
-                    // 注意：不是 used_flow_credits，而是 used_flex_credits (int_7)
-                    let used_prompt = plan_status.get("used_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let used_flex = plan_status.get("used_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    updated_account.used_quota = Some((used_prompt + used_flex) as i32);
-                    
-                    // 更新总配额 (available_flex_credits + available_prompt_credits)
-                    let available_flex = plan_status.get("available_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let available_prompt = plan_status.get("available_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    if available_flex > 0 || available_prompt > 0 {
-                        updated_account.total_quota = Some((available_flex + available_prompt) as i32);
-                    }
-                    
-                    // 更新订阅到期时间 (plan_end)
-                    if let Some(plan_end) = plan_status.get("plan_end").and_then(|v| v.as_i64()) {
-                        updated_account.subscription_expires_at = chrono::DateTime::from_timestamp(plan_end, 0);
-                    }
-                    
-                    updated_account.last_quota_update = Some(chrono::Utc::now());
+                    apply_plan_status_to_account(plan_status, &mut updated_account);
                     store.update_account(updated_account.clone()).await
                         .map_err(|e| format!("保存账户信息失败: {}", e))?;
                 }
@@ -187,6 +213,9 @@ pub async fn login_account(
                 if let Some(plan) = user_info.get("plan") {
                     if let Some(plan_name) = plan.get("plan_name").and_then(|v| v.as_str()) {
                         updated_account.plan_name = Some(plan_name.to_string());
+                    }
+                    if let Some(bs) = plan.get("billing_strategy").and_then(|v| v.as_i64()) {
+                        updated_account.billing_strategy = Some(bs as i32);
                     }
                 }
 
@@ -313,30 +342,7 @@ pub async fn refresh_token(
         if let Ok(result) = windsurf_service.get_plan_status(&token).await {
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(plan_status) = result.get("plan_status") {
-                    // 更新套餐名称
-                    if let Some(plan_name) = plan_status.get("plan_name").and_then(|v| v.as_str()) {
-                        updated_account.plan_name = Some(plan_name.to_string());
-                    }
-                    
-                    // 更新已用配额 (used_prompt_credits + used_flex_credits)
-                    // 注意：不是 used_flow_credits，而是 used_flex_credits (int_7)
-                    let used_prompt = plan_status.get("used_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let used_flex = plan_status.get("used_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    updated_account.used_quota = Some((used_prompt + used_flex) as i32);
-                    
-                    // 更新总配额 (available_flex_credits + available_prompt_credits)
-                    let available_flex = plan_status.get("available_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let available_prompt = plan_status.get("available_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    if available_flex > 0 || available_prompt > 0 {
-                        updated_account.total_quota = Some((available_flex + available_prompt) as i32);
-                    }
-                    
-                    // 更新订阅到期时间 (plan_end)
-                    if let Some(plan_end) = plan_status.get("plan_end").and_then(|v| v.as_i64()) {
-                        updated_account.subscription_expires_at = chrono::DateTime::from_timestamp(plan_end, 0);
-                    }
-
-                    updated_account.last_quota_update = Some(chrono::Utc::now());
+                    apply_plan_status_to_account(plan_status, &mut updated_account);
                     store.update_account(updated_account.clone()).await
                         .map_err(|e| format!("保存账户信息失败: {}", e))?;
                 }
@@ -361,6 +367,9 @@ pub async fn refresh_token(
                 if let Some(plan) = user_info.get("plan") {
                     if let Some(plan_name) = plan.get("plan_name").and_then(|v| v.as_str()) {
                         updated_account.plan_name = Some(plan_name.to_string());
+                    }
+                    if let Some(bs) = plan.get("billing_strategy").and_then(|v| v.as_i64()) {
+                        updated_account.billing_strategy = Some(bs as i32);
                     }
                 }
 
@@ -425,7 +434,13 @@ pub async fn refresh_token(
         "is_disabled": updated_account.is_disabled,
         "is_team_owner": updated_account.is_team_owner,
         "windsurf_api_key": updated_account.windsurf_api_key,
-        "last_quota_update": updated_account.last_quota_update.map(|t| t.to_rfc3339())
+        "last_quota_update": updated_account.last_quota_update.map(|t| t.to_rfc3339()),
+        "billing_strategy": updated_account.billing_strategy,
+        "daily_quota_remaining_percent": updated_account.daily_quota_remaining_percent,
+        "weekly_quota_remaining_percent": updated_account.weekly_quota_remaining_percent,
+        "daily_quota_reset_at_unix": updated_account.daily_quota_reset_at_unix,
+        "weekly_quota_reset_at_unix": updated_account.weekly_quota_reset_at_unix,
+        "overage_balance_micros": updated_account.overage_balance_micros
     }))
 }
 
@@ -463,29 +478,7 @@ pub async fn get_plan_status(
         if let Some(plan_status) = result.get("plan_status") {
             let mut updated_account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
             
-            // 更新套餐名称
-            if let Some(plan_name) = plan_status.get("plan_name").and_then(|v| v.as_str()) {
-                updated_account.plan_name = Some(plan_name.to_string());
-            }
-            
-            // 更新已用配额 (used_prompt_credits + used_flex_credits)
-            let used_prompt = plan_status.get("used_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-            let used_flex = plan_status.get("used_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-            updated_account.used_quota = Some((used_prompt + used_flex) as i32);
-            
-            // 更新总配额 (available_flex_credits + available_prompt_credits)
-            let available_flex = plan_status.get("available_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-            let available_prompt = plan_status.get("available_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-            if available_flex > 0 || available_prompt > 0 {
-                updated_account.total_quota = Some((available_flex + available_prompt) as i32);
-            }
-            
-            // 更新订阅到期时间 (plan_end)
-            if let Some(plan_end) = plan_status.get("plan_end").and_then(|v| v.as_i64()) {
-                updated_account.subscription_expires_at = chrono::DateTime::from_timestamp(plan_end, 0);
-            }
-            
-            updated_account.last_quota_update = Some(chrono::Utc::now());
+            apply_plan_status_to_account(plan_status, &mut updated_account);
             
             // 获取团队成员信息，判断是否为团队所有者（Admin）
             let is_team_owner = check_is_team_owner(&windsurf_service, &token, &updated_account.email).await;
@@ -881,29 +874,7 @@ pub async fn update_plan(
             if let Ok(plan_result) = windsurf_service.get_plan_status(&token).await {
                 if plan_result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                     if let Some(plan_status) = plan_result.get("plan_status") {
-                        // 更新套餐名称
-                        if let Some(plan_name) = plan_status.get("plan_name").and_then(|v| v.as_str()) {
-                            updated_account.plan_name = Some(plan_name.to_string());
-                        }
-                        
-                        // 更新已用配额 (used_prompt_credits + used_flex_credits)
-                        let used_prompt = plan_status.get("used_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let used_flex = plan_status.get("used_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                        updated_account.used_quota = Some((used_prompt + used_flex) as i32);
-                        
-                        // 更新总配额 (available_flex_credits + available_prompt_credits)
-                        let available_flex = plan_status.get("available_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let available_prompt = plan_status.get("available_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                        if available_flex > 0 || available_prompt > 0 {
-                            updated_account.total_quota = Some((available_flex + available_prompt) as i32);
-                        }
-                        
-                        // 更新订阅到期时间 (plan_end)
-                        if let Some(plan_end) = plan_status.get("plan_end").and_then(|v| v.as_i64()) {
-                            updated_account.subscription_expires_at = chrono::DateTime::from_timestamp(plan_end, 0);
-                        }
-
-                        updated_account.last_quota_update = Some(chrono::Utc::now());
+                        apply_plan_status_to_account(plan_status, &mut updated_account);
                         store.update_account(updated_account.clone()).await
                             .map_err(|e| format!("保存账户信息失败: {}", e))?;
                     }
@@ -924,6 +895,9 @@ pub async fn update_plan(
                     if let Some(plan) = user_info.get("plan") {
                         if let Some(plan_name) = plan.get("plan_name").and_then(|v| v.as_str()) {
                             updated_account.plan_name = Some(plan_name.to_string());
+                        }
+                        if let Some(bs) = plan.get("billing_strategy").and_then(|v| v.as_i64()) {
+                            updated_account.billing_strategy = Some(bs as i32);
                         }
                     }
 
@@ -1027,36 +1001,21 @@ fn get_current_user_internal<'a>(
         let mut used_quota: i64 = 0;
         let mut total_quota: i64 = 0;
         let mut expires_at: i64 = 0;
+        let mut billing_strategy_val: Option<i32> = updated_account.billing_strategy;
         
         if success {
             if let Some(plan_status) = result.get("plan_status") {
-                // 更新套餐名称
-                if let Some(pn) = plan_status.get("plan_name").and_then(|v| v.as_str()) {
-                    plan_name = pn.to_string();
-                    updated_account.plan_name = Some(pn.to_string());
-                }
+                apply_plan_status_to_account(plan_status, &mut updated_account);
                 
-                // 更新已用配额 (used_prompt_credits + used_flex_credits)
-                let used_prompt = plan_status.get("used_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                let used_flex = plan_status.get("used_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                used_quota = used_prompt + used_flex;
-                updated_account.used_quota = Some(used_quota as i32);
+                // 同步局部变量用于构建响应JSON
+                plan_name = updated_account.plan_name.clone().unwrap_or_default();
+                used_quota = updated_account.used_quota.unwrap_or(0) as i64;
+                total_quota = updated_account.total_quota.unwrap_or(0) as i64;
+                expires_at = updated_account.subscription_expires_at
+                    .map(|dt| dt.timestamp())
+                    .unwrap_or(0);
+                billing_strategy_val = updated_account.billing_strategy;
                 
-                // 更新总配额 (available_flex_credits + available_prompt_credits)
-                let available_flex = plan_status.get("available_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                let available_prompt = plan_status.get("available_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                total_quota = available_flex + available_prompt;
-                if total_quota > 0 {
-                    updated_account.total_quota = Some(total_quota as i32);
-                }
-                
-                // 更新订阅到期时间 (plan_end)
-                if let Some(plan_end) = plan_status.get("plan_end").and_then(|v| v.as_i64()) {
-                    expires_at = plan_end;
-                    updated_account.subscription_expires_at = chrono::DateTime::from_timestamp(plan_end, 0);
-                }
-
-                updated_account.last_quota_update = Some(chrono::Utc::now());
                 store.update_account(updated_account).await
                     .map_err(|e| format!("保存账户信息失败: {}", e))?;
             }
@@ -1078,7 +1037,8 @@ fn get_current_user_internal<'a>(
                 "lightweight": true,
                 "user_info": {
                     "plan": {
-                        "plan_name": plan_name
+                        "plan_name": plan_name,
+                        "billing_strategy": billing_strategy_val
                     },
                     "subscription": {
                         "used_quota": used_quota,
@@ -1120,6 +1080,9 @@ fn get_current_user_internal<'a>(
             if let Some(plan) = user_info.get("plan") {
                 if let Some(plan_name) = plan.get("plan_name").and_then(|v| v.as_str()) {
                     updated_account.plan_name = Some(plan_name.to_string());
+                }
+                if let Some(bs) = plan.get("billing_strategy").and_then(|v| v.as_i64()) {
+                    updated_account.billing_strategy = Some(bs as i32);
                 }
             }
 
@@ -1442,23 +1405,7 @@ async fn refresh_token_internal(
         if let Ok(result) = windsurf_service.get_plan_status(&token).await {
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(plan_status) = result.get("plan_status") {
-                    if let Some(plan_name) = plan_status.get("plan_name").and_then(|v| v.as_str()) {
-                        updated_account.plan_name = Some(plan_name.to_string());
-                    }
-                    let used_prompt = plan_status.get("used_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let used_flex = plan_status.get("used_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    updated_account.used_quota = Some((used_prompt + used_flex) as i32);
-                    
-                    let available_flex = plan_status.get("available_flex_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let available_prompt = plan_status.get("available_prompt_credits").and_then(|v| v.as_i64()).unwrap_or(0);
-                    if available_flex > 0 || available_prompt > 0 {
-                        updated_account.total_quota = Some((available_flex + available_prompt) as i32);
-                    }
-                    
-                    if let Some(plan_end) = plan_status.get("plan_end").and_then(|v| v.as_i64()) {
-                        updated_account.subscription_expires_at = chrono::DateTime::from_timestamp(plan_end, 0);
-                    }
-                    updated_account.last_quota_update = Some(chrono::Utc::now());
+                    apply_plan_status_to_account(plan_status, &mut updated_account);
                 }
             }
         }
@@ -1481,6 +1428,9 @@ async fn refresh_token_internal(
                 if let Some(plan) = user_info.get("plan") {
                     if let Some(plan_name) = plan.get("plan_name").and_then(|v| v.as_str()) {
                         updated_account.plan_name = Some(plan_name.to_string());
+                    }
+                    if let Some(bs) = plan.get("billing_strategy").and_then(|v| v.as_i64()) {
+                        updated_account.billing_strategy = Some(bs as i32);
                     }
                 }
 
@@ -1540,7 +1490,13 @@ async fn refresh_token_internal(
         "is_team_owner": updated_account.is_team_owner,
         "subscription_expires_at": updated_account.subscription_expires_at.map(|t| t.to_rfc3339()),
         "subscription_active": updated_account.subscription_active,
-        "last_quota_update": updated_account.last_quota_update.map(|t| t.to_rfc3339())
+        "last_quota_update": updated_account.last_quota_update.map(|t| t.to_rfc3339()),
+        "billing_strategy": updated_account.billing_strategy,
+        "daily_quota_remaining_percent": updated_account.daily_quota_remaining_percent,
+        "weekly_quota_remaining_percent": updated_account.weekly_quota_remaining_percent,
+        "daily_quota_reset_at_unix": updated_account.daily_quota_reset_at_unix,
+        "weekly_quota_reset_at_unix": updated_account.weekly_quota_reset_at_unix,
+        "overage_balance_micros": updated_account.overage_balance_micros
     }))
 }
 

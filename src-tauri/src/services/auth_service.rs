@@ -124,7 +124,18 @@ impl AuthService {
             .post(&url)
             .json(&request)
             .header("Content-Type", "application/json")
+            .header("Accept", "*/*")
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .header("Cache-Control", "no-cache")
+            .header("Pragma", "no-cache")
+            .header("Sec-Ch-Ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99""#)
+            .header("Sec-Ch-Ua-Mobile", "?0")
+            .header("Sec-Ch-Ua-Platform", r#""Windows""#)
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Site", "cross-site")
             .header("X-Client-Version", "Chrome/JsCore/11.0.0/FirebaseCore-web")
+            .header("Referer", "https://windsurf.com/")
             .send()
             .await
         {
@@ -252,6 +263,8 @@ impl AuthService {
             .post(&url)
             .json(&body)
             .header("Content-Type", "application/json")
+            .header("X-Client-Version", "Chrome/JsCore/11.0.0/FirebaseCore-web")
+            .header("Referer", "https://windsurf.com/")
             .send()
             .await
         {

@@ -464,6 +464,25 @@ export const useAccountsStore = defineStore('accounts', () => {
         if (result.is_team_owner !== undefined) {
           updatedAccount.is_team_owner = result.is_team_owner;
         }
+        // 更新配额百分比字段
+        if (result.billing_strategy !== undefined) {
+          updatedAccount.billing_strategy = result.billing_strategy;
+        }
+        if (result.daily_quota_remaining_percent !== undefined) {
+          updatedAccount.daily_quota_remaining_percent = result.daily_quota_remaining_percent;
+        }
+        if (result.weekly_quota_remaining_percent !== undefined) {
+          updatedAccount.weekly_quota_remaining_percent = result.weekly_quota_remaining_percent;
+        }
+        if (result.daily_quota_reset_at_unix !== undefined) {
+          updatedAccount.daily_quota_reset_at_unix = result.daily_quota_reset_at_unix;
+        }
+        if (result.weekly_quota_reset_at_unix !== undefined) {
+          updatedAccount.weekly_quota_reset_at_unix = result.weekly_quota_reset_at_unix;
+        }
+        if (result.overage_balance_micros !== undefined) {
+          updatedAccount.overage_balance_micros = result.overage_balance_micros;
+        }
         updatedAccount.last_quota_update = dayjs().toISOString();
         
         // 根据模式选择更新方式

@@ -362,6 +362,7 @@ pub struct PlanInfo {
     pub can_share_conversations: bool, // field 28: 可分享对话
     pub can_allow_cascade_in_background: bool, // field 29: 允许Cascade后台运行
     pub browser_enabled: bool,       // field 31: 浏览器功能
+    pub billing_strategy: i32,       // field 35: 计费策略 (0=UNSPECIFIED, 1=CREDITS, 2=QUOTA, 3=ACU)
 }
 
 /// UserRole message (seat_management_pb.UserRole)
@@ -536,6 +537,7 @@ pub fn extract_user_info(parsed_data: &Value) -> Result<UserInfo, String> {
             can_share_conversations: p.get("int_28").and_then(|v| v.as_i64()).map(|v| v == 1).unwrap_or(false),
             can_allow_cascade_in_background: p.get("int_29").and_then(|v| v.as_i64()).map(|v| v == 1).unwrap_or(false),
             browser_enabled: p.get("int_31").and_then(|v| v.as_i64()).map(|v| v == 1).unwrap_or(false),
+            billing_strategy: p.get("int_35").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         }
     });
 
@@ -1173,6 +1175,10 @@ impl ProtobufParser {
                 if let Some(v) = plan_info.get("int_31").and_then(|v| v.as_i64()) {
                     result["browser_enabled"] = json!(v != 0);
                 }
+                // field 35: billing_strategy (0=UNSPECIFIED, 1=CREDITS, 2=QUOTA, 3=ACU)
+                if let Some(v) = plan_info.get("int_35").and_then(|v| v.as_i64()) {
+                    result["billing_strategy"] = json!(v);
+                }
             }
             
             // 提取计费周期 (Timestamp 类型)
@@ -1220,6 +1226,27 @@ impl ProtobufParser {
                 if let Some(status) = top_up.get("int_1").and_then(|v| v.as_i64()) {
                     result["top_up_status"] = json!(status);
                 }
+            }
+            
+            // field 14: daily_quota_remaining_percent
+            if let Some(v) = plan_status.get("int_14").and_then(|v| v.as_i64()) {
+                result["daily_quota_remaining_percent"] = json!(v);
+            }
+            // field 15: weekly_quota_remaining_percent
+            if let Some(v) = plan_status.get("int_15").and_then(|v| v.as_i64()) {
+                result["weekly_quota_remaining_percent"] = json!(v);
+            }
+            // field 16: overage_balance_micros
+            if let Some(v) = plan_status.get("int_16").and_then(|v| v.as_i64()) {
+                result["overage_balance_micros"] = json!(v);
+            }
+            // field 17: daily_quota_reset_at_unix
+            if let Some(v) = plan_status.get("int_17").and_then(|v| v.as_i64()) {
+                result["daily_quota_reset_at_unix"] = json!(v);
+            }
+            // field 18: weekly_quota_reset_at_unix
+            if let Some(v) = plan_status.get("int_18").and_then(|v| v.as_i64()) {
+                result["weekly_quota_reset_at_unix"] = json!(v);
             }
         }
         

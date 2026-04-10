@@ -36,7 +36,7 @@
 
     <div class="card-body">
       <!-- 配额和套餐信息 -->
-      <div class="quota-section" v-if="account.total_quota">
+      <div class="quota-section" v-if="hasQuotaData">
         <div class="quota-header">
           <div class="quota-header-left">
             <el-tag v-if="account.plan_name" :class="['plan-tag', `plan-${account.plan_name?.toLowerCase()}`]" size="small">
@@ -47,21 +47,58 @@
               {{ account.plan_name }}
             </el-tag>
           </div>
-          <div class="quota-header-right">
+          <!-- CREDITS 模式：显示积分数值 -->
+          <div class="quota-header-right" v-if="!isQuotaMode">
             <span class="quota-used">{{ formatQuota(account.used_quota) }}</span>
             <span class="quota-separator">/</span>
             <span class="quota-total">{{ formatQuota(account.total_quota) }}</span>
           </div>
         </div>
-        <div class="quota-progress">
-          <el-progress
-            :percentage="quotaPercentage"
-            :stroke-width="8"
-            :color="quotaColor"
-            :show-text="false"
-          />
-          <span class="quota-percentage">{{ quotaPercentage }}%</span>
-        </div>
+
+        <!-- QUOTA 模式：日配额和周配额百分比 -->
+        <template v-if="isQuotaMode">
+          <div class="quota-percent-row">
+            <span class="quota-percent-label">日配额</span>
+            <el-progress
+              :percentage="account.daily_quota_remaining_percent ?? 0"
+              :stroke-width="8"
+              :color="dailyQuotaColor"
+              :show-text="false"
+              class="quota-percent-bar"
+            />
+            <span class="quota-percent-value">{{ account.daily_quota_remaining_percent ?? 0 }}%</span>
+            <span class="quota-reset-time" v-if="formatResetTime(account.daily_quota_reset_at_unix)">
+              {{ formatResetTime(account.daily_quota_reset_at_unix) }}
+            </span>
+          </div>
+          <div class="quota-percent-row">
+            <span class="quota-percent-label">周配额</span>
+            <el-progress
+              :percentage="account.weekly_quota_remaining_percent ?? 0"
+              :stroke-width="8"
+              :color="weeklyQuotaColor"
+              :show-text="false"
+              class="quota-percent-bar"
+            />
+            <span class="quota-percent-value">{{ account.weekly_quota_remaining_percent ?? 0 }}%</span>
+            <span class="quota-reset-time" v-if="formatResetTime(account.weekly_quota_reset_at_unix)">
+              {{ formatResetTime(account.weekly_quota_reset_at_unix) }}
+            </span>
+          </div>
+        </template>
+
+        <!-- CREDITS 模式：积分进度条 -->
+        <template v-else>
+          <div class="quota-progress">
+            <el-progress
+              :percentage="quotaPercentage"
+              :stroke-width="8"
+              :color="quotaColor"
+              :show-text="false"
+            />
+            <span class="quota-percentage">{{ quotaPercentage }}%</span>
+          </div>
+        </template>
         
         <!-- 订阅到期时间（整合在配额区块内） -->
         <div class="quota-expiry" v-if="account.subscription_expires_at">
@@ -585,19 +622,53 @@ const statusText = computed(() => {
   return '错误';
 });
 
-// 配额百分比
+// 是否为配额百分比模式 (billing_strategy === 2 即 QUOTA)
+const isQuotaMode = computed(() => props.account.billing_strategy === 2);
+
+// 是否有配额数据可展示（QUOTA 模式或 CREDITS 模式）
+const hasQuotaData = computed(() => {
+  if (isQuotaMode.value) {
+    return props.account.daily_quota_remaining_percent !== undefined 
+        || props.account.weekly_quota_remaining_percent !== undefined;
+  }
+  return !!props.account.total_quota;
+});
+
+// 配额百分比（仅 CREDITS 模式使用，表示已用占比）
 const quotaPercentage = computed(() => {
   if (!props.account.total_quota || !props.account.used_quota) return 0;
   return Math.min(Math.round((props.account.used_quota / props.account.total_quota) * 100), 100);
 });
 
-// 配额颜色
+// 配额颜色（仅 CREDITS 模式使用）
 const quotaColor = computed(() => {
   const percentage = quotaPercentage.value;
   if (percentage < 50) return '#10b981';  // 绿色
   if (percentage < 80) return '#f59e0b';  // 橙色
   return '#ef4444';  // 红色
 });
+
+// 日配额剩余百分比的颜色（QUOTA 模式）
+const dailyQuotaColor = computed(() => {
+  const remaining = props.account.daily_quota_remaining_percent ?? 0;
+  if (remaining > 50) return '#10b981';
+  if (remaining > 20) return '#f59e0b';
+  return '#ef4444';
+});
+
+// 周配额剩余百分比的颜色（QUOTA 模式）
+const weeklyQuotaColor = computed(() => {
+  const remaining = props.account.weekly_quota_remaining_percent ?? 0;
+  if (remaining > 50) return '#10b981';
+  if (remaining > 20) return '#f59e0b';
+  return '#ef4444';
+});
+
+// 格式化配额重置时间
+function formatResetTime(unixTimestamp: number | undefined): string {
+  if (!unixTimestamp || unixTimestamp <= 0) return '';
+  return dayjs.unix(unixTimestamp).format('MM-DD HH:mm');
+}
 
 // 刷新按钮提示文本
 const refreshButtonTooltip = computed(() => {
@@ -829,6 +900,32 @@ async function handleRefreshToken() {
         // 更新套餐信息
         if (result.user_info.plan?.plan_name) {
           updatedAccount.plan_name = result.user_info.plan.plan_name;
+        }
+        // 从 plan 中读取 billing_strategy
+        if (result.user_info.plan?.billing_strategy !== undefined) {
+          updatedAccount.billing_strategy = result.user_info.plan.billing_strategy;
+        }
+        
+        // 合并 plan_status 中的新配额字段（避免覆盖后端已保存的数据）
+        if (result.plan_status) {
+          if (result.plan_status.billing_strategy !== undefined) {
+            updatedAccount.billing_strategy = result.plan_status.billing_strategy;
+          }
+          if (result.plan_status.daily_quota_remaining_percent !== undefined) {
+            updatedAccount.daily_quota_remaining_percent = result.plan_status.daily_quota_remaining_percent;
+          }
+          if (result.plan_status.weekly_quota_remaining_percent !== undefined) {
+            updatedAccount.weekly_quota_remaining_percent = result.plan_status.weekly_quota_remaining_percent;
+          }
+          if (result.plan_status.daily_quota_reset_at_unix !== undefined) {
+            updatedAccount.daily_quota_reset_at_unix = result.plan_status.daily_quota_reset_at_unix;
+          }
+          if (result.plan_status.weekly_quota_reset_at_unix !== undefined) {
+            updatedAccount.weekly_quota_reset_at_unix = result.plan_status.weekly_quota_reset_at_unix;
+          }
+          if (result.plan_status.overage_balance_micros !== undefined) {
+            updatedAccount.overage_balance_micros = result.plan_status.overage_balance_micros;
+          }
         }
         
         // 更新配额信息
@@ -1989,6 +2086,52 @@ async function handleSwitchAccount() {
   color: #475569;
 }
 
+/* QUOTA 模式：日/周配额百分比行样式 */
+.quota-percent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.quota-percent-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  min-width: 36px;
+  flex-shrink: 0;
+}
+
+.quota-percent-bar {
+  flex: 1;
+}
+
+.quota-percent-bar :deep(.el-progress-bar__outer) {
+  background-color: #e2e8f0;
+  height: 6px !important;
+}
+
+.quota-percent-bar :deep(.el-progress-bar__inner) {
+  border-radius: 10px;
+  transition: all 0.3s ease;
+}
+
+.quota-percent-value {
+  min-width: 36px;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  flex-shrink: 0;
+}
+
+.quota-reset-time {
+  font-size: 10px;
+  color: #94a3b8;
+  flex-shrink: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
 /* 配额区块内的订阅到期时间样式 */
 .quota-expiry {
   display: flex;
@@ -2466,6 +2609,22 @@ async function handleSwitchAccount() {
 
 :root.dark .quota-progress :deep(.el-progress-bar__outer) {
   background-color: #374151;
+}
+
+:root.dark .quota-percent-label {
+  color: #94a3b8;
+}
+
+:root.dark .quota-percent-value {
+  color: #cbd5e1;
+}
+
+:root.dark .quota-percent-bar :deep(.el-progress-bar__outer) {
+  background-color: #374151;
+}
+
+:root.dark .quota-reset-time {
+  color: #64748b;
 }
 
 /* 暗色主题下的订阅到期时间样式 */

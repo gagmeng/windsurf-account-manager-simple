@@ -57,6 +57,12 @@ export const apiService = {
     total_quota?: number;
     subscription_expires_at?: string;
     is_disabled?: boolean;
+    billing_strategy?: number;
+    daily_quota_remaining_percent?: number;
+    weekly_quota_remaining_percent?: number;
+    daily_quota_reset_at_unix?: number;
+    weekly_quota_reset_at_unix?: number;
+    overage_balance_micros?: number;
   }> {
     return await invoke('login_account', { id });
   },
@@ -73,6 +79,12 @@ export const apiService = {
     subscription_expires_at?: string;
     is_disabled?: boolean;
     is_team_owner?: boolean;
+    billing_strategy?: number;
+    daily_quota_remaining_percent?: number;
+    weekly_quota_remaining_percent?: number;
+    daily_quota_reset_at_unix?: number;
+    weekly_quota_reset_at_unix?: number;
+    overage_balance_micros?: number;
   }> {
     return await invoke('refresh_token', { id });
   },

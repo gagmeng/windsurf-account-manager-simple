@@ -28,6 +28,36 @@ pub enum OperationType {
     DeleteAccount,
     EditAccount,
     BatchOperation,
+    // 分组管理
+    AddGroup,
+    DeleteGroup,
+    RenameGroup,
+    ChangeGroup,
+    // 标签管理
+    AddTag,
+    DeleteTag,
+    UpdateTag,
+    BatchUpdateTags,
+    // 团队管理
+    CreateTeam,
+    JoinTeam,
+    LeaveTeam,
+    InviteMember,
+    RemoveMember,
+    TransferSubscription,
+    GetTeamInfo,
+    // 数据管理
+    ImportData,
+    ExportData,
+    CreateBackup,
+    RestoreBackup,
+    // 切换账号
+    SwitchAccount,
+    // 订阅相关
+    ApplyTrial,
+    CancelSubscription,
+    // 注册相关
+    RegisterAccount,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
