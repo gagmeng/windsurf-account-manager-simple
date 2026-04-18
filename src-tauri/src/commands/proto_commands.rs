@@ -1,6 +1,6 @@
 use crate::models::{OperationLog, OperationType, OperationStatus};
 use crate::repository::DataStore;
-use crate::services::WindsurfService;
+use crate::services::{AuthContext, WindsurfService};
 use crate::utils::AppError;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -26,13 +26,13 @@ pub async fn get_current_user_parsed(
     super::api_commands::ensure_valid_token(&store, &mut account, uuid).await?;
     
     // 使用缓存的或新刷新的Token
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 用户详情始终使用完整的 GetCurrentUser API（不受轻量级 API 设置影响）
     let windsurf_service = WindsurfService::new();
     println!("[get_current_user_parsed] Using GetCurrentUser API for account: {}", id);
     
-    let result: serde_json::Value = windsurf_service.get_current_user(&token)
+    let result: serde_json::Value = windsurf_service.get_current_user(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
     

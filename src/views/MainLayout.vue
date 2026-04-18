@@ -34,7 +34,7 @@
             class="group-item"
           >
             <div class="group-item-content">
-              <span @click="filterByGroup(group)" class="group-name">{{ group }}</span>
+              <span @click="filterByGroup(group)" class="group-name">{{ group }} <span class="group-count">({{ getGroupAccountCount(group) }})</span></span>
               <div class="group-actions" v-if="group !== '默认分组'">
                 <el-icon @click.stop="showRenameGroupDialog(group)" class="group-action-icon">
                   <Edit />
@@ -592,7 +592,7 @@ import {
   SortDown
 } from '@element-plus/icons-vue';
 import { useAccountsStore, useSettingsStore, useUIStore } from '@/store';
-import { apiService, settingsApi, accountApi } from '@/api';
+import { apiService, settingsApi, accountApi, devinApi } from '@/api';
 import type { Account } from '@/types';
 import dayjs from 'dayjs';
 import AccountCard from '@/components/AccountCard.vue';
@@ -778,6 +778,10 @@ const sidebarWidth = computed(() => uiStore.sidebarCollapsed ? '64px' : '240px')
 function setActiveMenu(menu: string) {
   activeMenu.value = menu;
   accountsStore.clearFilter();
+}
+
+function getGroupAccountCount(group: string): number {
+  return accountsStore.accounts.filter(acc => acc.group === group).length;
 }
 
 function filterByGroup(group: string) {
@@ -1129,34 +1133,119 @@ function handleBatchImport() {
 
 // 批量导入确认（从对话框接收数据）
 async function handleBatchImportConfirm(
-  accountsToImport: Array<{ email: string; password: string; remark: string; refreshToken?: string }>,
+  accountsToImport: Array<{ email: string; password: string; remark: string; refreshToken?: string; sessionToken?: string }>,
   autoLogin: boolean,
   group: string = '默认分组',
   tags: string[] = [],
-  mode: 'password' | 'refresh_token' = 'password'
+  mode: 'password' | 'refresh_token' | 'devin_session_token' = 'password',
+  authProvider: 'firebase' | 'devin' | 'smart' = 'firebase'
 ) {
   // 获取并发设置
   const unlimitedConcurrent = settingsStore.settings?.unlimitedConcurrentRefresh || false;
   const concurrencyLimit = settingsStore.settings?.concurrent_limit || 5;
-  
+
+  // === Devin Session Token 模式：逐条调 add_account_by_devin_session_token，不走 sniff/importTask ===
+  if (mode === 'devin_session_token') {
+    await handleDevinSessionTokenBatchImport(accountsToImport, group, tags, unlimitedConcurrent, concurrencyLimit);
+    return;
+  }
+
+  const providerLabel =
+    authProvider === 'devin' ? 'Devin'
+    : authProvider === 'smart' ? '智能识别'
+    : 'Firebase';
   const modeLabel = mode === 'refresh_token' ? 'Refresh Token' : '邮箱密码';
-  
+  const fullLabel = `${providerLabel} · ${modeLabel}`;
+  // 多组织自动首选计数：批量结束后汇总提示
+  let devinAutoOrgPickedCount = 0;
+  // 智能模式下的嗅探结果：email -> 实际走的 provider
+  const resolvedProviders = new Map<string, 'firebase' | 'devin'>();
+  // 嗅探环节被跳过的账号（SSO / 未设密码 / 未注册 / 企业禁许 / 网络异常等）
+  const skippedBySniff: Array<{ email: string; reason: string }> = [];
+
   // 显示进度提示
   let progressMsg = ElMessage({
     message: unlimitedConcurrent
-      ? `正在全量并发导入 ${accountsToImport.length} 个账号（${modeLabel}模式）...`
-      : `正在导入 ${accountsToImport.length} 个账号（${modeLabel}模式，并发${concurrencyLimit}）...`,
+      ? `正在全量并发导入 ${accountsToImport.length} 个账号（${fullLabel}）...`
+      : `正在导入 ${accountsToImport.length} 个账号（${fullLabel}，并发${concurrencyLimit}）...`,
     duration: 0,
     icon: Loading
   });
-  
-  const results: Array<{ email: string; success: boolean; accountId?: string; error?: string }> = [];
-  
+
+  // === 智能识别模式：导入前先并发嗅探所有账号的登录流派 ===
+  if (authProvider === 'smart' && mode === 'password') {
+    progressMsg.close();
+    progressMsg = ElMessage({
+      message: `正在识别 ${accountsToImport.length} 个账号的登录类型……`,
+      duration: 0,
+      icon: Loading
+    });
+
+    const sniffResults = await Promise.all(
+      accountsToImport.map(async (item) => {
+        try {
+          const sniff = await devinApi.sniffLoginMethod(item.email);
+          return { email: item.email, sniff, error: null as string | null };
+        } catch (e) {
+          return { email: item.email, sniff: null, error: String(e) };
+        }
+      })
+    );
+
+    for (const r of sniffResults) {
+      if (r.error || !r.sniff) {
+        skippedBySniff.push({ email: r.email, reason: `嗅探失败: ${r.error || '未知错误'}` });
+        continue;
+      }
+      switch (r.sniff.recommended) {
+        case 'firebase':
+          resolvedProviders.set(r.email, 'firebase');
+          break;
+        case 'devin':
+          resolvedProviders.set(r.email, 'devin');
+          break;
+        default:
+          // sso / no_password / not_found / blocked —— 均无法自动导入，挂失败
+          skippedBySniff.push({
+            email: r.email,
+            reason: `[${r.sniff.recommended}] ${r.sniff.reason}`,
+          });
+      }
+    }
+
+    progressMsg.close();
+    progressMsg = ElMessage({
+      message: unlimitedConcurrent
+        ? `嗅探完成，正在全量并发导入 ${resolvedProviders.size} 个账号……`
+        : `嗅探完成，正在导入 ${resolvedProviders.size} 个账号（并发${concurrencyLimit}）……`,
+      duration: 0,
+      icon: Loading
+    });
+  }
+
+  // 崇探被跳过的账号不进入 importTask，但要在结果集中序列语义上表现为失败
+  const itemsToImport =
+    authProvider === 'smart' && mode === 'password'
+      ? accountsToImport.filter(item => resolvedProviders.has(item.email))
+      : accountsToImport;
+
+  const results: Array<{
+    email: string;
+    success: boolean;
+    accountId?: string;
+    error?: string;
+    effectiveProvider?: 'firebase' | 'devin';
+  }> = skippedBySniff.map(s => ({ email: s.email, success: false, error: s.reason }));
+
   // 单个导入任务
   const importTask = async (item: { email: string; password: string; remark: string; refreshToken?: string }) => {
+    // 计算本条实际走的 provider（智能模式从嗅探结果取，其余模式直接用 authProvider）
+    const effectiveProvider: 'firebase' | 'devin' =
+      authProvider === 'smart' ? resolvedProviders.get(item.email)! : authProvider;
+
     try {
       if (mode === 'refresh_token' && item.refreshToken) {
-        // Refresh Token 模式：调用后端命令
+        // Refresh Token 模式：调用后端命令（仅 Firebase；Devin/smart 在对话框侧已禁用该 radio）
         const result = await invoke<any>('add_account_by_refresh_token', {
           refreshToken: item.refreshToken,
           nickname: item.remark || undefined,
@@ -1165,12 +1254,88 @@ async function handleBatchImportConfirm(
         });
         
         if (result.success) {
-          return { email: result.email, success: true, accountId: result.account?.id };
+          return { email: result.email, success: true, accountId: result.account?.id, effectiveProvider };
         } else {
-          return { email: item.email, success: false, error: result.error || '添加失败' };
+          return { email: item.email, success: false, error: result.error || '添加失败', effectiveProvider };
         }
+      } else if (effectiveProvider === 'devin') {
+        // Devin 账密导入：调 add_account_by_devin_login；多组织时自动取 orgs[0] 再二次落库
+        const loginResult = await invoke<any>('add_account_by_devin_login', {
+          email: item.email,
+          password: item.password,
+          nickname: item.remark || undefined,
+          tags: tags.length > 0 ? [...tags] : [],
+          group: group,
+          orgId: null,
+        });
+
+        if (loginResult?.success && !loginResult?.requires_org_selection) {
+          // 单组织直通：后端已完成落库 + enrich
+          return {
+            email: loginResult.email || item.email,
+            success: true,
+            accountId: loginResult.account?.id,
+            effectiveProvider,
+          };
+        }
+
+        if (loginResult?.requires_org_selection) {
+          const orgs: Array<{ org_id?: string; id?: string; name?: string }> = loginResult.orgs || [];
+          const firstOrgId = orgs[0]?.org_id || orgs[0]?.id;
+          if (!firstOrgId) {
+            return {
+              email: item.email,
+              success: false,
+              error: '[Devin] 多组织但 orgs[] 为空，无法自动选择',
+              effectiveProvider,
+            };
+          }
+          const auth1Token: string = loginResult.auth1_token;
+          if (!auth1Token) {
+            return {
+              email: item.email,
+              success: false,
+              error: '[Devin] 多组织响应缺失 auth1_token',
+              effectiveProvider,
+            };
+          }
+          // 二次落库（使用首个组织）——传 password 让账号卡可回显用户原始密码
+          const withOrgResult = await invoke<any>('add_account_by_devin_with_org', {
+            email: item.email,
+            auth1Token,
+            orgId: firstOrgId,
+            nickname: item.remark || undefined,
+            tags: tags.length > 0 ? [...tags] : [],
+            group: group,
+            password: item.password,
+          });
+
+          if (withOrgResult?.success) {
+            devinAutoOrgPickedCount += 1;
+            return {
+              email: withOrgResult.email || item.email,
+              success: true,
+              accountId: withOrgResult.account?.id,
+              effectiveProvider,
+            };
+          }
+          return {
+            email: item.email,
+            success: false,
+            error: withOrgResult?.error || '[Devin] 多组织二次落库失败',
+            effectiveProvider,
+          };
+        }
+
+        // 既非 success 也非 requires_org_selection
+        return {
+          email: item.email,
+          success: false,
+          error: loginResult?.error || loginResult?.message || '[Devin] 登录失败',
+          effectiveProvider,
+        };
       } else {
-        // 邮箱密码模式
+        // 邮箱密码模式（Firebase）
         const newAccount = await accountsStore.addAccount({
           email: item.email,
           password: item.password,
@@ -1178,30 +1343,30 @@ async function handleBatchImportConfirm(
           tags: tags.length > 0 ? [...tags] : [],
           group: group
         });
-        return { email: item.email, success: true, accountId: newAccount.id };
+        return { email: item.email, success: true, accountId: newAccount.id, effectiveProvider };
       }
     } catch (error) {
       console.error(`导入账号 ${item.email} 失败:`, error);
-      return { email: item.email, success: false, error: String(error) };
+      return { email: item.email, success: false, error: String(error), effectiveProvider };
     }
   };
   
   try {
     if (unlimitedConcurrent) {
       // 全量并发导入
-      const allResults = await Promise.all(accountsToImport.map(item => importTask(item)));
+      const allResults = await Promise.all(itemsToImport.map(item => importTask(item)));
       results.push(...allResults);
     } else {
       // 分批并发处理
-      for (let i = 0; i < accountsToImport.length; i += concurrencyLimit) {
-        const batch = accountsToImport.slice(i, i + concurrencyLimit);
+      for (let i = 0; i < itemsToImport.length; i += concurrencyLimit) {
+        const batch = itemsToImport.slice(i, i + concurrencyLimit);
         const batchResults = await Promise.all(batch.map(item => importTask(item)));
         results.push(...batchResults);
         
         // 更新进度
         progressMsg.close();
         progressMsg = ElMessage({
-          message: `导入进度: ${results.length}/${accountsToImport.length}`,
+          message: `导入进度: ${results.length - skippedBySniff.length}/${itemsToImport.length}`,
           duration: 0,
           icon: Loading
         });
@@ -1212,9 +1377,16 @@ async function handleBatchImportConfirm(
     const addedAccounts = results.filter(r => r.success);
     const failedAccounts = results.filter(r => !r.success);
     
-    // 并发登录成功添加的账号（refresh_token 模式已经获取了账号信息，无需再登录）
+    // 并发登录成功添加的账号
+    // - refresh_token 模式：已拿账号信息，跳过
+    // - Devin 模式：add_account_by_devin_login 已完成 post_auth + enrich_account_with_plan_status，跳过
+    // - Firebase + 邮箱密码：按 autoLogin 选项决定是否逐账号调 loginAccount
+    //
+    // 智能模式下同一批中 Firebase/Devin 混合，按 result.effectiveProvider === 'firebase' 过滤
+    const needsAutoLogin = (r: typeof results[number]) =>
+      r.success && r.effectiveProvider === 'firebase';
     let loginSuccessCount = 0;
-    if (autoLogin && addedAccounts.length > 0 && mode === 'password') {
+    if (autoLogin && addedAccounts.some(needsAutoLogin) && mode === 'password') {
       progressMsg.close();
       progressMsg = ElMessage({
         message: unlimitedConcurrent
@@ -1224,6 +1396,9 @@ async function handleBatchImportConfirm(
         icon: Loading
       });
       
+      // Firebase 子集（智能模式下仅包含 effectiveProvider === 'firebase' 的行）
+      const firebaseAddedAccounts = addedAccounts.filter(needsAutoLogin);
+
       // 单个登录任务
       const loginTask = async (item: { email: string; accountId?: string }) => {
         try {
@@ -1245,19 +1420,19 @@ async function handleBatchImportConfirm(
       
       if (unlimitedConcurrent) {
         // 全量并发登录
-        const allLoginResults = await Promise.all(addedAccounts.map(item => loginTask(item)));
+        const allLoginResults = await Promise.all(firebaseAddedAccounts.map(item => loginTask(item)));
         loginResults.push(...allLoginResults);
       } else {
         // 分批并发登录
-        for (let i = 0; i < addedAccounts.length; i += concurrencyLimit) {
-          const batch = addedAccounts.slice(i, i + concurrencyLimit);
+        for (let i = 0; i < firebaseAddedAccounts.length; i += concurrencyLimit) {
+          const batch = firebaseAddedAccounts.slice(i, i + concurrencyLimit);
           const batchResults = await Promise.all(batch.map(item => loginTask(item)));
           loginResults.push(...batchResults);
           
           // 更新进度
           progressMsg.close();
           progressMsg = ElMessage({
-            message: `登录进度: ${loginResults.length}/${addedAccounts.length}`,
+            message: `登录进度: ${loginResults.length}/${firebaseAddedAccounts.length}`,
             duration: 0,
             icon: Loading
           });
@@ -1275,24 +1450,35 @@ async function handleBatchImportConfirm(
     
     // 显示最终结果
     if (addedAccounts.length > 0) {
-      let message = `成功导入 ${addedAccounts.length} 个账号`;
+      let message = `成功导入 ${addedAccounts.length} 个账号（${providerLabel}）`;
+      if (authProvider === 'smart') {
+        const firebaseCount = addedAccounts.filter(r => r.effectiveProvider === 'firebase').length;
+        const devinCount = addedAccounts.filter(r => r.effectiveProvider === 'devin').length;
+        message += `（Firebase ${firebaseCount} · Devin ${devinCount}）`;
+      }
       if (autoLogin && loginSuccessCount > 0) {
         message += `，${loginSuccessCount} 个已登录`;
       }
-      if (failedAccounts.length > 0) {
-        message += `，失败 ${failedAccounts.length} 个`;
+      if (devinAutoOrgPickedCount > 0) {
+        message += `，${devinAutoOrgPickedCount} 个多组织账号已自动选择首个组织`;
+      }
+      if (skippedBySniff.length > 0) {
+        message += `，${skippedBySniff.length} 个没识别到可用流派`;
+      }
+      if (failedAccounts.length - skippedBySniff.length > 0) {
+        message += `，其余失败 ${failedAccounts.length - skippedBySniff.length} 个`;
       }
       ElMessage.success({
         message,
-        duration: 4000,
+        duration: 5000,
         showClose: true
       });
       await accountsStore.loadAccounts();
     } else {
       let errorMsg = '没有成功导入任何账号';
       if (failedAccounts.length > 0) {
-        const details = failedAccounts.slice(0, 3).map(f => f.email).join(', ');
-        errorMsg += `\n失败账号: ${details}${failedAccounts.length > 3 ? '...' : ''}`;
+        const details = failedAccounts.slice(0, 3).map(f => `${f.email}（${f.error || '未知'}）`).join('\n');
+        errorMsg += `\n${details}${failedAccounts.length > 3 ? '\n...' : ''}`;
       }
       ElMessage.error({
         message: errorMsg,
@@ -1305,6 +1491,102 @@ async function handleBatchImportConfirm(
     showBatchImportDialog.value = false;
     batchImportDialogRef.value?.resetImporting();
     ElMessage.error(`批量导入失败: ${error}`);
+  }
+}
+
+/**
+ * Devin Session Token 批量导入辅助函数
+ *
+ * 逐条调 devinApi.addAccountBySessionToken，后端反查 GetCurrentUser 拿 email / 配额并落库。
+ * 不走 sniff/importTask 链路（session_token 本身就是 Devin 凭证，无需嗅探）。
+ */
+async function handleDevinSessionTokenBatchImport(
+  items: Array<{ email: string; password: string; remark: string; refreshToken?: string; sessionToken?: string }>,
+  group: string,
+  tags: string[],
+  unlimitedConcurrent: boolean,
+  concurrencyLimit: number,
+) {
+  let progressMsg = ElMessage({
+    message: unlimitedConcurrent
+      ? `正在全量并发导入 ${items.length} 个 Devin Session Token...`
+      : `正在导入 ${items.length} 个 Devin Session Token（并发${concurrencyLimit}）...`,
+    duration: 0,
+    icon: Loading,
+  });
+
+  const results: Array<{ email: string; success: boolean; error?: string }> = [];
+
+  const importTask = async (item: { remark: string; sessionToken?: string }) => {
+    if (!item.sessionToken) {
+      return { email: '(missing token)', success: false, error: '缺少 sessionToken' };
+    }
+    try {
+      const result = await devinApi.addAccountBySessionToken({
+        sessionToken: item.sessionToken,
+        nickname: item.remark || undefined,
+        tags: tags.length > 0 ? [...tags] : [],
+        group: group,
+      });
+      if (result.success) {
+        return { email: result.email || '(unknown)', success: true };
+      }
+      return {
+        email: result.email || '(unknown)',
+        success: false,
+        error: result.message || '导入失败',
+      };
+    } catch (e) {
+      return {
+        email: item.sessionToken.slice(0, 30) + '...',
+        success: false,
+        error: String(e),
+      };
+    }
+  };
+
+  try {
+    if (unlimitedConcurrent) {
+      const all = await Promise.all(items.map(importTask));
+      results.push(...all);
+    } else {
+      for (let i = 0; i < items.length; i += concurrencyLimit) {
+        const batch = items.slice(i, i + concurrencyLimit);
+        const batchResults = await Promise.all(batch.map(importTask));
+        results.push(...batchResults);
+        progressMsg.close();
+        progressMsg = ElMessage({
+          message: `导入进度: ${results.length}/${items.length}`,
+          duration: 0,
+          icon: Loading,
+        });
+      }
+    }
+
+    progressMsg.close();
+    showBatchImportDialog.value = false;
+    batchImportDialogRef.value?.resetImporting();
+
+    const succeeded = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success);
+    if (succeeded > 0) {
+      let msg = `成功通过 Session Token 导入 ${succeeded} 个 Devin 账号`;
+      if (failed.length > 0) msg += `，失败 ${failed.length} 个`;
+      ElMessage.success({ message: msg, duration: 5000, showClose: true });
+      await accountsStore.loadAccounts();
+    } else {
+      const details = failed.slice(0, 3).map(f => `${f.email}（${f.error || '未知'}）`).join('\n');
+      ElMessage.error({
+        message: `没有成功导入任何账号\n${details}${failed.length > 3 ? '\n...' : ''}`,
+        duration: 5000,
+        showClose: true,
+      });
+    }
+  } catch (e) {
+    progressMsg.close();
+    showBatchImportDialog.value = false;
+    batchImportDialogRef.value?.resetImporting();
+    ElMessage.error(`批量导入失败: ${e}`);
   }
 }
 
@@ -2390,6 +2672,12 @@ onUnmounted(() => {
 .group-name {
   flex: 1;
   cursor: pointer;
+}
+
+.group-count {
+  font-size: 12px;
+  color: #909399;
+  font-weight: normal;
 }
 
 .group-actions {

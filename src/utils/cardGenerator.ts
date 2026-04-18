@@ -40,6 +40,7 @@ export async function getTrialPaymentLink(
   autoOpen: boolean,
   teamsTier: number,
   paymentPeriod: number,
+  startTrial: boolean,
   teamName?: string,
   seatCount?: number,
   turnstileToken?: string
@@ -50,6 +51,7 @@ export async function getTrialPaymentLink(
     autoOpen,
     teamsTier,
     paymentPeriod,
+    startTrial,
     teamName,
     seatCount,
     turnstileToken

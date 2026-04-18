@@ -810,6 +810,30 @@ impl DataStore {
         Ok(())
     }
     
+    /// 删除指定备份
+    pub async fn delete_backup(&self, backup_name: &str) -> AppResult<()> {
+        let backup_dir = self.config_path.parent()
+            .ok_or_else(|| AppError::Config("Invalid config path".to_string()))?
+            .join("backups");
+        
+        let backup_path = backup_dir.join(backup_name);
+        
+        // 安全检查：确保备份路径在备份目录下
+        if !backup_path.starts_with(&backup_dir) {
+            return Err(AppError::Config("Invalid backup path".to_string()));
+        }
+        
+        // 确保是文件且以 accounts_ 开头且以 .json 结尾
+        if !backup_path.is_file() || !backup_name.starts_with("accounts_") || !backup_name.ends_with(".json") {
+            return Err(AppError::Config("Invalid backup file".to_string()));
+        }
+        
+        fs::remove_file(&backup_path)?;
+        println!("[Backup] 已删除备份: {}", backup_name);
+        
+        Ok(())
+    }
+    
     /// 获取数据目录路径
     pub fn get_data_dir(&self) -> PathBuf {
         self.config_path.parent()

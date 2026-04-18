@@ -43,7 +43,10 @@ pub enum AppError {
     
     #[error("API request error: {0}")]
     ApiRequest(String),
-    
+
+    #[error("Parse error: {0}")]
+    Parse(String),
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }

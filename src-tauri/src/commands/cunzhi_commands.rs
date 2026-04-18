@@ -1,12 +1,22 @@
+use crate::repository::DataStore;
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Manager, State};
 use zip::ZipArchive;
+
+/// 根据客户端类型获取进程名和 .codeium 子目录名
+fn get_cunzhi_client_config(client_type: &str) -> (&'static str, &'static str) {
+    match client_type {
+        "windsurf-next" => ("Windsurf - Next", "windsurf-next"),
+        _ => ("Windsurf", "windsurf"),
+    }
+}
 
 
 /// 获取 MCP 可执行文件名（单二进制，包含 MCP + UI）
@@ -152,63 +162,65 @@ fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// 关闭 Windsurf 进程
-fn kill_windsurf() -> Result<(), String> {
+/// 关闭客户端进程
+fn kill_windsurf(process_name: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        let exe_name = format!("{}.exe", process_name);
         let _ = Command::new("taskkill")
-            .args(["/f", "/im", "Windsurf.exe"])
+            .args(["/f", "/im", &exe_name])
             .output();
         thread::sleep(Duration::from_millis(500));
     }
     #[cfg(target_os = "macos")]
     {
         let _ = Command::new("pkill")
-            .args(["-f", "Windsurf"])
+            .args(["-f", process_name])
             .output();
         thread::sleep(Duration::from_millis(500));
     }
     #[cfg(target_os = "linux")]
     {
         let _ = Command::new("pkill")
-            .args(["-f", "windsurf"])
+            .args(["-f", &process_name.to_lowercase()])
             .output();
         thread::sleep(Duration::from_millis(500));
     }
     Ok(())
 }
 
-/// 启动 Windsurf
-fn start_windsurf(windsurf_path: Option<&str>) -> Result<(), String> {
+/// 启动客户端
+fn start_windsurf(windsurf_path: Option<&str>, process_name: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        let exe_name = format!("{}.exe", process_name);
         // 优先使用传入的路径
         if let Some(path_str) = windsurf_path {
-            let windsurf_exe = PathBuf::from(path_str).join("Windsurf.exe");
-            println!("[Cunzhi] Using configured Windsurf path: {:?}", windsurf_exe);
-            if windsurf_exe.exists() {
-                match Command::new(&windsurf_exe).spawn() {
+            let client_exe = PathBuf::from(path_str).join(&exe_name);
+            println!("[Cunzhi] Using configured path: {:?}", client_exe);
+            if client_exe.exists() {
+                match Command::new(&client_exe).spawn() {
                     Ok(_) => {
-                        println!("[Cunzhi] Windsurf started successfully");
+                        println!("[Cunzhi] {} started successfully", process_name);
                         return Ok(());
                     }
                     Err(e) => {
-                        println!("[Cunzhi] Failed to start Windsurf: {}", e);
+                        println!("[Cunzhi] Failed to start {}: {}", process_name, e);
                     }
                 }
             }
         }
         // 后备：尝试通过 cmd /c start 启动
-        println!("[Cunzhi] Trying to start Windsurf via cmd...");
+        println!("[Cunzhi] Trying to start {} via cmd...", process_name);
         match Command::new("cmd")
-            .args(["/c", "start", "", "Windsurf"])
+            .args(["/c", "start", "", process_name])
             .spawn() {
             Ok(_) => {
-                println!("[Cunzhi] Windsurf started via cmd");
+                println!("[Cunzhi] {} started via cmd", process_name);
                 return Ok(());
             }
             Err(e) => {
-                println!("[Cunzhi] Failed to start Windsurf via cmd: {}", e);
+                println!("[Cunzhi] Failed to start {} via cmd: {}", process_name, e);
             }
         }
     }
@@ -216,70 +228,71 @@ fn start_windsurf(windsurf_path: Option<&str>) -> Result<(), String> {
     {
         // 优先使用传入的路径
         if let Some(path_str) = windsurf_path {
-            let windsurf_app = PathBuf::from(path_str);
-            println!("[Cunzhi] Using configured Windsurf path: {:?}", windsurf_app);
-            if windsurf_app.exists() {
-                match Command::new("open").arg("-a").arg(&windsurf_app).spawn() {
+            let client_app = PathBuf::from(path_str);
+            println!("[Cunzhi] Using configured path: {:?}", client_app);
+            if client_app.exists() {
+                match Command::new("open").arg("-a").arg(&client_app).spawn() {
                     Ok(_) => {
-                        println!("[Cunzhi] Windsurf started successfully");
+                        println!("[Cunzhi] {} started successfully", process_name);
                         return Ok(());
                     }
                     Err(e) => {
-                        println!("[Cunzhi] Failed to start Windsurf: {}", e);
+                        println!("[Cunzhi] Failed to start {}: {}", process_name, e);
                     }
                 }
             }
         }
         // 后备：尝试通过 open 命令启动
-        println!("[Cunzhi] Trying to start Windsurf via open...");
-        match Command::new("open").arg("-a").arg("Windsurf").spawn() {
+        println!("[Cunzhi] Trying to start {} via open...", process_name);
+        match Command::new("open").arg("-a").arg(process_name).spawn() {
             Ok(_) => {
-                println!("[Cunzhi] Windsurf started via open");
+                println!("[Cunzhi] {} started via open", process_name);
                 return Ok(());
             }
             Err(e) => {
-                println!("[Cunzhi] Failed to start Windsurf via open: {}", e);
+                println!("[Cunzhi] Failed to start {} via open: {}", process_name, e);
             }
         }
     }
     #[cfg(target_os = "linux")]
     {
+        let exe_lower = process_name.to_lowercase();
         // 优先使用传入的路径
         if let Some(path_str) = windsurf_path {
-            let windsurf_exe = PathBuf::from(path_str).join("windsurf");
-            println!("[Cunzhi] Using configured Windsurf path: {:?}", windsurf_exe);
-            if windsurf_exe.exists() {
-                match Command::new(&windsurf_exe).spawn() {
+            let client_exe = PathBuf::from(path_str).join(&exe_lower);
+            println!("[Cunzhi] Using configured path: {:?}", client_exe);
+            if client_exe.exists() {
+                match Command::new(&client_exe).spawn() {
                     Ok(_) => {
-                        println!("[Cunzhi] Windsurf started successfully");
+                        println!("[Cunzhi] {} started successfully", process_name);
                         return Ok(());
                     }
                     Err(e) => {
-                        println!("[Cunzhi] Failed to start Windsurf: {}", e);
+                        println!("[Cunzhi] Failed to start {}: {}", process_name, e);
                     }
                 }
             }
         }
         // 后备：尝试通过 PATH 启动
-        println!("[Cunzhi] Trying to start Windsurf via PATH...");
-        match Command::new("windsurf").spawn() {
+        println!("[Cunzhi] Trying to start {} via PATH...", process_name);
+        match Command::new(&exe_lower).spawn() {
             Ok(_) => {
-                println!("[Cunzhi] Windsurf started via PATH");
+                println!("[Cunzhi] {} started via PATH", process_name);
                 return Ok(());
             }
             Err(e) => {
-                println!("[Cunzhi] Failed to start Windsurf via PATH: {}", e);
+                println!("[Cunzhi] Failed to start {} via PATH: {}", process_name, e);
             }
         }
     }
     Ok(())
 }
 
-/// 重启 Windsurf
-fn restart_windsurf(windsurf_path: Option<&str>) -> Result<(), String> {
-    kill_windsurf()?;
+/// 重启客户端
+fn restart_windsurf(windsurf_path: Option<&str>, process_name: &str) -> Result<(), String> {
+    kill_windsurf(process_name)?;
     thread::sleep(Duration::from_millis(500));
-    start_windsurf(windsurf_path)?;
+    start_windsurf(windsurf_path, process_name)?;
     Ok(())
 }
 
@@ -304,30 +317,30 @@ fn get_cunzhi_install_dir() -> PathBuf {
 }
 
 /// 获取 MCP 配置文件路径
-fn get_mcp_config_path() -> PathBuf {
+fn get_mcp_config_path(codeium_dir: &str) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
-        PathBuf::from(home).join(".codeium").join("windsurf").join("mcp_config.json")
+        PathBuf::from(home).join(".codeium").join(codeium_dir).join("mcp_config.json")
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".codeium").join("windsurf").join("mcp_config.json")
+        PathBuf::from(home).join(".codeium").join(codeium_dir).join("mcp_config.json")
     }
 }
 
 /// 获取全局规则文件路径
-fn get_global_rules_path() -> PathBuf {
+fn get_global_rules_path(codeium_dir: &str) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
-        PathBuf::from(home).join(".codeium").join("windsurf").join("memories").join("global_rules.md")
+        PathBuf::from(home).join(".codeium").join(codeium_dir).join("memories").join("global_rules.md")
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".codeium").join("windsurf").join("memories").join("global_rules.md")
+        PathBuf::from(home).join(".codeium").join(codeium_dir).join("memories").join("global_rules.md")
     }
 }
 
@@ -360,11 +373,18 @@ const OLD_RULE_MARKERS: &[&str] = &[
 
 /// 检查伟哥(寸止)状态
 #[tauri::command]
-pub async fn check_cunzhi_status() -> Result<serde_json::Value, String> {
+pub async fn check_cunzhi_status(
+    data_store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let client_type = match data_store.get_settings().await {
+        Ok(s) => s.windsurf_client_type,
+        Err(_) => "windsurf".to_string(),
+    };
+    let (_, codeium_dir) = get_cunzhi_client_config(&client_type);
     let install_dir = get_cunzhi_install_dir();
     let mcp_exe = install_dir.join(get_mcp_exe_name());
-    let mcp_config_path = get_mcp_config_path();
-    let global_rules_path = get_global_rules_path();
+    let mcp_config_path = get_mcp_config_path(codeium_dir);
+    let global_rules_path = get_global_rules_path(codeium_dir);
     
     // 检查 MCP 服务器是否存在
     let mcp_installed = mcp_exe.exists();
@@ -405,10 +425,19 @@ pub async fn check_cunzhi_status() -> Result<serde_json::Value, String> {
 
 /// 安装伟哥(寸止)
 #[tauri::command]
-pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<String>) -> Result<serde_json::Value, String> {
+pub async fn install_cunzhi(
+    app_handle: tauri::AppHandle,
+    windsurf_path: Option<String>,
+    data_store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let client_type = match data_store.get_settings().await {
+        Ok(s) => s.windsurf_client_type,
+        Err(_) => "windsurf".to_string(),
+    };
+    let (process_name, codeium_dir) = get_cunzhi_client_config(&client_type);
     let install_dir = get_cunzhi_install_dir();
-    let mcp_config_path = get_mcp_config_path();
-    let global_rules_path = get_global_rules_path();
+    let mcp_config_path = get_mcp_config_path(codeium_dir);
+    let global_rules_path = get_global_rules_path(codeium_dir);
     
     // 1. 创建安装目录
     if !install_dir.exists() {
@@ -579,14 +608,14 @@ pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<
             .map_err(|e| format!("创建全局规则失败: {}", e))?;
     }
     
-    // 5. 重启 Windsurf 使配置生效
-    if let Err(e) = restart_windsurf(windsurf_path.as_deref()) {
-        println!("[Cunzhi] Warning: Failed to restart Windsurf: {}", e);
+    // 5. 重启客户端使配置生效
+    if let Err(e) = restart_windsurf(windsurf_path.as_deref(), process_name) {
+        println!("[Cunzhi] Warning: Failed to restart {}: {}", process_name, e);
     }
     
     Ok(json!({
         "success": true,
-        "message": "伟哥功能安装成功，Windsurf 已重启",
+        "message": format!("伟哥功能安装成功，{} 已重启", process_name),
         "install_dir": install_dir.to_string_lossy(),
         "mcp_config": mcp_config_path.to_string_lossy(),
         "global_rules": global_rules_path.to_string_lossy()
@@ -595,14 +624,22 @@ pub async fn install_cunzhi(app_handle: tauri::AppHandle, windsurf_path: Option<
 
 /// 卸载伟哥(寸止)
 #[tauri::command]
-pub async fn uninstall_cunzhi(windsurf_path: Option<String>) -> Result<serde_json::Value, String> {
+pub async fn uninstall_cunzhi(
+    windsurf_path: Option<String>,
+    data_store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let client_type = match data_store.get_settings().await {
+        Ok(s) => s.windsurf_client_type,
+        Err(_) => "windsurf".to_string(),
+    };
+    let (process_name, codeium_dir) = get_cunzhi_client_config(&client_type);
     let install_dir = get_cunzhi_install_dir();
-    let mcp_config_path = get_mcp_config_path();
-    let global_rules_path = get_global_rules_path();
+    let mcp_config_path = get_mcp_config_path(codeium_dir);
+    let global_rules_path = get_global_rules_path(codeium_dir);
     
-    // 0. 先关闭 Windsurf
-    if let Err(e) = kill_windsurf() {
-        println!("[Cunzhi] Warning: Failed to kill Windsurf: {}", e);
+    // 0. 先关闭客户端
+    if let Err(e) = kill_windsurf(process_name) {
+        println!("[Cunzhi] Warning: Failed to kill {}: {}", process_name, e);
     }
     
     // 1. Remove all MCP configs (all versions)
@@ -676,13 +713,13 @@ pub async fn uninstall_cunzhi(windsurf_path: Option<String>) -> Result<serde_jso
         }
     }
     
-    // 4. 重新启动 Windsurf
-    if let Err(e) = start_windsurf(windsurf_path.as_deref()) {
-        println!("[Cunzhi] Warning: Failed to start Windsurf: {}", e);
+    // 4. 重新启动客户端
+    if let Err(e) = start_windsurf(windsurf_path.as_deref(), process_name) {
+        println!("[Cunzhi] Warning: Failed to start {}: {}", process_name, e);
     }
     
     Ok(json!({
         "success": true,
-        "message": "伟哥功能已关闭，Windsurf 已重启"
+        "message": format!("伟哥功能已关闭，{} 已重启", process_name)
     }))
 }

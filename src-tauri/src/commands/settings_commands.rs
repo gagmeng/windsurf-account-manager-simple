@@ -272,6 +272,17 @@ pub async fn restore_backup(
     }))
 }
 
+/// 删除指定备份
+#[tauri::command]
+pub async fn delete_backup(
+    backup_name: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<(), String> {
+    store.delete_backup(&backup_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// 导出数据到指定路径
 #[tauri::command]
 pub async fn export_data_to_file(

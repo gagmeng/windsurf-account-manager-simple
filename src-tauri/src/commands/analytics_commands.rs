@@ -4,7 +4,7 @@ use crate::models::{
     ChatStats, ChatStatsByDay, ChatStatsByModel, CustomQueryResponse, CustomQueryResponseItem,
 };
 use crate::repository::DataStore;
-use crate::services::{AnalyticsService, WindsurfService, proto_parser};
+use crate::services::{AnalyticsService, AuthContext, WindsurfService, proto_parser};
 use serde_json::Value;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -28,14 +28,16 @@ pub async fn get_account_analytics(
     // 确保有有效的Token
     super::api_commands::ensure_valid_token(&store, &mut account, uuid).await?;
 
+    // AnalyticsService 仍用纯 token，WindsurfService 用完整 AuthContext（支持 Devin 5-header）
     let token = account.token.clone().ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     // 获取或更新 Windsurf API Key，同时检查是否是团队账户
     let (windsurf_api_key, is_team) = if let Some(api_key) = &account.windsurf_api_key {
         println!("[get_account_analytics] Using cached Windsurf API Key: {}", api_key);
         // 对于缓存的 API Key，需要再次获取用户信息来判断是否是团队账户
         let windsurf_service = WindsurfService::new();
-        let user_info_result = windsurf_service.get_current_user(&token)
+        let user_info_result = windsurf_service.get_current_user(&ctx)
             .await
             .map_err(|e| format!("Failed to get current user: {}", e))?;
         
@@ -62,7 +64,7 @@ pub async fn get_account_analytics(
 
         // 调用 GetCurrentUser API 获取用户的 Windsurf API Key
         let windsurf_service = WindsurfService::new();
-        let user_info_result = windsurf_service.get_current_user(&token)
+        let user_info_result = windsurf_service.get_current_user(&ctx)
             .await
             .map_err(|e| format!("Failed to get current user: {}", e))?;
 

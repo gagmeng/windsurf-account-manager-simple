@@ -8,6 +8,36 @@ use std::sync::Arc;
 use tauri::State;
 use crate::repository::DataStore;
 
+/// 客户端配置信息
+struct ClientConfig {
+    /// 进程名（不含 .exe）
+    process_name: &'static str,
+    /// Windows 开始菜单文件夹名
+    start_menu_folder: &'static str,
+    /// Windows 常见安装目录名
+    install_dir_name: &'static str,
+    /// macOS .app 名称
+    #[allow(dead_code)]
+    macos_app_name: &'static str,
+}
+
+fn get_client_config(client_type: &str) -> ClientConfig {
+    match client_type {
+        "windsurf-next" => ClientConfig {
+            process_name: "Windsurf - Next",
+            start_menu_folder: "Windsurf - Next",
+            install_dir_name: "Windsurf - Next",
+            macos_app_name: "Windsurf - Next",
+        },
+        _ => ClientConfig {
+            process_name: "Windsurf",
+            start_menu_folder: "Windsurf",
+            install_dir_name: "Windsurf",
+            macos_app_name: "Windsurf",
+        },
+    }
+}
+
 /// 获取 extension.js 相对路径（跨平台）
 fn get_extension_js_relative_path() -> PathBuf {
     #[cfg(target_os = "macos")]
@@ -33,14 +63,19 @@ fn get_extension_js_relative_path() -> PathBuf {
     }
 }
 
-/// 获取Windsurf的安装路径
-#[command]
-pub async fn get_windsurf_path() -> Result<String, String> {
+/// 检测客户端安装路径（内部函数，可跨模块调用）
+pub fn detect_windsurf_path_internal(client_type: &str) -> Result<String, String> {
+    let config = get_client_config(client_type);
+    detect_windsurf_path_by_config(&config)
+}
+
+fn detect_windsurf_path_by_config(config: &ClientConfig) -> Result<String, String> {
+    
     #[cfg(target_os = "windows")]
     {
         // Windows: 首先尝试从开始菜单快捷方式获取
         let start_menu_path = std::env::var("APPDATA")
-            .map(|p| PathBuf::from(p).join("Microsoft\\Windows\\Start Menu\\Programs\\Windsurf"))
+            .map(|p| PathBuf::from(p).join(format!("Microsoft\\Windows\\Start Menu\\Programs\\{}", config.start_menu_folder)))
             .ok();
         
         if let Some(start_menu) = start_menu_path {
@@ -64,11 +99,12 @@ pub async fn get_windsurf_path() -> Result<String, String> {
         }
         
         // Windows: 尝试常见的安装位置
+        let dir_name = config.install_dir_name;
         let possible_locations = vec![
-            std::env::var("LOCALAPPDATA").ok().map(|p| PathBuf::from(p).join("Programs\\Windsurf")),
-            Some(PathBuf::from("C:\\Program Files\\Windsurf")),
-            Some(PathBuf::from("C:\\Program Files (x86)\\Windsurf")),
-            Some(PathBuf::from("D:\\Program\\Windsurf")),
+            std::env::var("LOCALAPPDATA").ok().map(|p| PathBuf::from(p).join(format!("Programs\\{}", dir_name))),
+            Some(PathBuf::from(format!("C:\\Program Files\\{}", dir_name))),
+            Some(PathBuf::from(format!("C:\\Program Files (x86)\\{}", dir_name))),
+            Some(PathBuf::from(format!("D:\\Program\\{}", dir_name))),
         ];
         
         for location in possible_locations.into_iter().flatten() {
@@ -81,10 +117,10 @@ pub async fn get_windsurf_path() -> Result<String, String> {
     
     #[cfg(target_os = "macos")]
     {
-        // macOS: 检查 /Applications/Windsurf.app
+        let app_name = format!("{}.app", config.macos_app_name);
         let possible_locations = vec![
-            PathBuf::from("/Applications/Windsurf.app"),
-            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join("Applications/Windsurf.app")).unwrap_or_default(),
+            PathBuf::from(format!("/Applications/{}", app_name)),
+            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(format!("Applications/{}", app_name))).unwrap_or_default(),
         ];
         
         for location in possible_locations {
@@ -97,11 +133,11 @@ pub async fn get_windsurf_path() -> Result<String, String> {
     
     #[cfg(target_os = "linux")]
     {
-        // Linux: 检查常见安装位置
+        let dir_name = config.install_dir_name;
         let possible_locations = vec![
-            PathBuf::from("/opt/Windsurf"),
-            PathBuf::from("/usr/share/windsurf"),
-            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share/Windsurf")).unwrap_or_default(),
+            PathBuf::from(format!("/opt/{}", dir_name)),
+            PathBuf::from(format!("/usr/share/{}", dir_name.to_lowercase())),
+            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(format!(".local/share/{}", dir_name))).unwrap_or_default(),
         ];
         
         for location in possible_locations {
@@ -112,7 +148,14 @@ pub async fn get_windsurf_path() -> Result<String, String> {
         }
     }
     
-    Err("未找到Windsurf安装路径".to_string())
+    Err(format!("未找到 {} 安装路径", config.process_name))
+}
+
+/// 获取客户端的安装路径（Tauri 命令）
+#[command]
+pub async fn get_windsurf_path(client_type: Option<String>) -> Result<String, String> {
+    let ct = client_type.as_deref().unwrap_or("windsurf");
+    detect_windsurf_path_internal(ct)
 }
 
 /// 解析Windows快捷方式
@@ -154,13 +197,12 @@ fn resolve_shortcut(_lnk_path: &Path) -> Result<PathBuf, String> {
     Err("不支持的操作系统".to_string())
 }
 
-/// 应用无感换号补丁
-#[command]
-pub async fn apply_seamless_patch(
-    windsurf_path: String,
-    data_store: State<'_, Arc<DataStore>>,
+/// 应用无感换号补丁（内部函数，可跨模块调用）
+pub async fn apply_seamless_patch_internal(
+    windsurf_path: &str,
+    data_store: &Arc<DataStore>,
 ) -> Result<serde_json::Value, String> {
-    let extension_file = PathBuf::from(&windsurf_path).join(get_extension_js_relative_path());
+    let extension_file = PathBuf::from(windsurf_path).join(get_extension_js_relative_path());
     
     if !extension_file.exists() {
         return Err(format!("extension.js 文件不存在: {:?}", extension_file));
@@ -230,8 +272,11 @@ pub async fn apply_seamless_patch(
         
         // 检查两个变量名是否相同
         if var_name1 == var_name2 {
+            // 注入策略：不依赖任何 bundle 标识符（u / class 名），内联 URLSearchParams 解析
+            // fragment 提取 access_token，直接转交给实例方法 handleAuthToken。
+            // 兼容 Windsurf 1.110+ 把 handleUri 重构为 class static 方法的情形。
             let replacement = format!(
-                r#"this._uriHandler.event(async {}=>{{if("/refresh-authentication-session"==={}.path){{(0,{}.refreshAuthenticationSession)()}}else{{try{{const t=u.handleUri({});await this.handleAuthToken(t)}}catch(e){{console.error("[Windsurf] Failed to handle OAuth callback:",e)}}}}}})"#,
+                r#"this._uriHandler.event(async {}=>{{if("/refresh-authentication-session"==={}.path){{(0,{}.refreshAuthenticationSession)()}}else{{try{{const t=new URLSearchParams({}.fragment).get("access_token");if(!t)throw new Error("No access_token in URI fragment");await this.handleAuthToken(t)}}catch(e){{console.error("[Windsurf] Failed to handle OAuth callback:",e)}}}}}})"#,
                 var_name1, var_name1, module_name, var_name1
             );
             
@@ -275,19 +320,35 @@ pub async fn apply_seamless_patch(
     // 7. 保存补丁状态到设置
     let mut settings = data_store.get_settings().await.map_err(|e| e.to_string())?;
     settings.seamless_switch_enabled = true;
-    settings.windsurf_path = Some(windsurf_path.clone());
+    settings.windsurf_path = Some(windsurf_path.to_string());
     settings.patch_backup_path = Some(backup_file.to_string_lossy().to_string());
+    let client_type = settings.windsurf_client_type.clone();
     data_store.update_settings(settings).await.map_err(|e| e.to_string())?;
     
-    // 8. 重启Windsurf
-    restart_windsurf().await?;
+    // 8. 重启Windsurf（仅在进程运行中时才重启）
+    let restarted = restart_windsurf(&client_type).await?;
+    let message = if restarted {
+        "补丁应用成功，客户端正在重启"
+    } else {
+        "补丁应用成功（客户端未运行，无需重启）"
+    };
     
     Ok(serde_json::json!({
         "success": true,
         "modifications": modifications,
         "backup_file": backup_file.to_string_lossy().to_string(),
-        "message": "补丁应用成功，Windsurf正在重启"
+        "restarted": restarted,
+        "message": message
     }))
+}
+
+/// 应用无感换号补丁（Tauri 命令）
+#[command]
+pub async fn apply_seamless_patch(
+    windsurf_path: String,
+    data_store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    apply_seamless_patch_internal(&windsurf_path, &data_store).await
 }
 
 /// 还原无感换号补丁
@@ -316,15 +377,22 @@ pub async fn restore_seamless_patch(
     
     // 更新设置
     let mut settings = data_store.get_settings().await.map_err(|e| e.to_string())?;
+    let client_type = settings.windsurf_client_type.clone();
     settings.seamless_switch_enabled = false;
     data_store.update_settings(settings).await.map_err(|e| e.to_string())?;
     
-    // 重启Windsurf
-    restart_windsurf().await?;
+    // 重启Windsurf（仅在进程运行中时才重启）
+    let restarted = restart_windsurf(&client_type).await?;
+    let message = if restarted {
+        "补丁已还原，客户端正在重启"
+    } else {
+        "补丁已还原（客户端未运行，无需重启）"
+    };
     
     Ok(serde_json::json!({
         "success": true,
-        "message": "补丁已还原，Windsurf正在重启",
+        "restarted": restarted,
+        "message": message,
         "backup_used": backup_path.to_string_lossy().to_string()
     }))
 }
@@ -396,83 +464,127 @@ pub async fn check_patch_status(
     }))
 }
 
-/// 重启Windsurf
-async fn restart_windsurf() -> Result<(), String> {
+/// 检测指定进程是否正在运行
+fn is_process_running(process_name: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         
-        // 1. 关闭Windsurf
+        let exe_name = format!("{}.exe", process_name);
+        if let Ok(output) = Command::new("tasklist")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(&["/FI", &format!("IMAGENAME eq {}", exe_name), "/NH"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return stdout.contains(&exe_name);
+        }
+        false
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(output) = Command::new("pgrep")
+            .args(&["-f", process_name])
+            .output()
+        {
+            return output.status.success();
+        }
+        false
+    }
+}
+
+/// 重启Windsurf（仅在进程运行中时才执行）
+/// 返回 Ok(true) 表示执行了重启，Ok(false) 表示进程未运行跳过重启
+async fn restart_windsurf(client_type: &str) -> Result<bool, String> {
+    let config = get_client_config(client_type);
+    
+    // 先检测进程是否在运行
+    if !is_process_running(config.process_name) {
+        println!("[restart] {} 未运行，跳过重启", config.process_name);
+        return Ok(false);
+    }
+    
+    println!("[restart] {} 正在运行，执行重启...", config.process_name);
+    
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        
+        let exe_name = format!("{}.exe", config.process_name);
+        
+        // 1. 关闭进程
         Command::new("taskkill")
             .creation_flags(CREATE_NO_WINDOW)
-            .args(&["/F", "/IM", "Windsurf.exe"])
+            .args(&["/F", "/IM", &exe_name])
             .output()
-            .map_err(|e| format!("关闭Windsurf失败: {}", e))?;
+            .map_err(|e| format!("关闭 {} 失败: {}", config.process_name, e))?;
         
         // 等待进程完全结束
         std::thread::sleep(std::time::Duration::from_secs(2));
         
-        // 2. 尝试从开始菜单启动Windsurf
+        // 2. 尝试从开始菜单启动
         let start_menu = std::env::var("APPDATA")
-            .map(|p| PathBuf::from(p).join("Microsoft\\Windows\\Start Menu\\Programs\\Windsurf"))
+            .map(|p| PathBuf::from(p).join(format!("Microsoft\\Windows\\Start Menu\\Programs\\{}", config.start_menu_folder)))
             .map_err(|e| format!("获取开始菜单路径失败: {}", e))?;
         
         if let Ok(entries) = fs::read_dir(&start_menu) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.file_name().and_then(|n| n.to_str()).map(|n| n.contains("Windsurf")).unwrap_or(false) 
+                if path.file_name().and_then(|n| n.to_str()).map(|n| n.contains(config.process_name)).unwrap_or(false) 
                    && path.extension().and_then(|s| s.to_str()) == Some("lnk") {
                     
                     Command::new("cmd")
                         .creation_flags(CREATE_NO_WINDOW)
                         .args(&["/C", "start", "", &path.to_string_lossy()])
                         .spawn()
-                        .map_err(|e| format!("启动Windsurf失败: {}", e))?;
+                        .map_err(|e| format!("启动 {} 失败: {}", config.process_name, e))?;
                     
-                    return Ok(());
+                    return Ok(true);
                 }
             }
         }
         
-        return Err("未找到Windsurf快捷方式".to_string());
+        return Err(format!("未找到 {} 快捷方式", config.process_name));
     }
     
     #[cfg(target_os = "macos")]
     {
-        // 1. 关闭Windsurf
+        // 1. 关闭进程
         Command::new("pkill")
-            .args(&["-f", "Windsurf"])
+            .args(&["-f", config.process_name])
             .output()
-            .map_err(|e| format!("关闭Windsurf失败: {}", e))?;
+            .map_err(|e| format!("关闭 {} 失败: {}", config.process_name, e))?;
         
         std::thread::sleep(std::time::Duration::from_secs(2));
         
-        // 2. 启动Windsurf
+        // 2. 启动
         Command::new("open")
-            .args(&["-a", "Windsurf"])
+            .args(&["-a", config.macos_app_name])
             .spawn()
-            .map_err(|e| format!("启动Windsurf失败: {}", e))?;
+            .map_err(|e| format!("启动 {} 失败: {}", config.process_name, e))?;
         
-        return Ok(());
+        return Ok(true);
     }
     
     #[cfg(target_os = "linux")]
     {
-        // 1. 关闭Windsurf
+        // 1. 关闭进程
         Command::new("pkill")
-            .args(&["-f", "windsurf"])
+            .args(&["-f", &config.process_name.to_lowercase()])
             .output()
-            .map_err(|e| format!("关闭Windsurf失败: {}", e))?;
+            .map_err(|e| format!("关闭 {} 失败: {}", config.process_name, e))?;
         
         std::thread::sleep(std::time::Duration::from_secs(2));
         
-        // 2. 启动Windsurf
-        Command::new("windsurf")
+        // 2. 启动
+        Command::new(&config.process_name.to_lowercase())
             .spawn()
-            .map_err(|e| format!("启动Windsurf失败: {}", e))?;
+            .map_err(|e| format!("启动 {} 失败: {}", config.process_name, e))?;
         
-        return Ok(());
+        return Ok(true);
     }
     
     #[allow(unreachable_code)]

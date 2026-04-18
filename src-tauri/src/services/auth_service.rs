@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-const FIREBASE_API_KEY: &str = "AIzaSyDsOl-1XpT5err0Tcnx8FFod1H8gVGIycY";
+pub const FIREBASE_API_KEY: &str = "AIzaSyDsOl-1XpT5err0Tcnx8FFod1H8gVGIycY";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignInRequest {
@@ -135,6 +135,7 @@ impl AuthService {
             .header("Sec-Fetch-Mode", "cors")
             .header("Sec-Fetch-Site", "cross-site")
             .header("X-Client-Version", "Chrome/JsCore/11.0.0/FirebaseCore-web")
+            .header("Origin", "https://windsurf.com")
             .header("Referer", "https://windsurf.com/")
             .send()
             .await
@@ -208,6 +209,7 @@ impl AuthService {
             .header("X-Browser-Year", "2025")
             .header("X-Client-Data", "CIu2yQEIo7bJAQipncoBCIiSywEIlqHLAQiFoM0BCPOYzwEI1prPAQ==")
             .header("X-Client-Version", "Chrome/JsCore/11.0.0/FirebaseCore-web")
+            .header("Origin", "https://windsurf.com")
             .header("Referer", "https://windsurf.com/")
             .body(body)
             .send()
@@ -264,6 +266,7 @@ impl AuthService {
             .json(&body)
             .header("Content-Type", "application/json")
             .header("X-Client-Version", "Chrome/JsCore/11.0.0/FirebaseCore-web")
+            .header("Origin", "https://windsurf.com")
             .header("Referer", "https://windsurf.com/")
             .send()
             .await

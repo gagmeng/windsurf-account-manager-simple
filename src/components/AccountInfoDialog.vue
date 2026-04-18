@@ -2,7 +2,7 @@
   <el-dialog
     v-model="visible"
     title="账号信息"
-    width="850px"
+    width="1000px"
     class="account-info-dialog"
     :close-on-click-modal="false"
     @close="handleClose"
@@ -1951,13 +1951,39 @@ function getPermissionCount(permissions: any): number {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    
-    .el-tag {
-      display: flex;
+  }
+}
+
+/* ==========================================================================
+   共用：所有带"图标 + 文字"型 el-tag 的容器统一对齐策略
+   - 覆盖范围：
+     · .feature-switches .feature-tags —— 功能开关（快速补全/Tab跳转/...）
+     · .flag-tags-bottom               —— 用户头部下方标志（禁用遥测/订阅邮件/...）
+     · .team-flags                     —— 团队信息卡内标志（订阅激活/已用试用/...）
+   - 关键点：
+     1. :deep() 穿透 scoped，确保匹配 element-plus 渲染出的类名
+     2. inline-flex + align-items:center —— 让 el-icon 与文本节点（anonymous flex item）垂直居中
+     3. line-height:1 —— 消除 el-tag 默认行高导致的文本 box 高于 icon box 的视觉偏差
+     4. svg { display:block } —— 去除 SVG 默认 inline baseline 导致的 0.125em 下沉
+   ========================================================================== */
+.feature-switches .feature-tags,
+.flag-tags-bottom,
+.team-flags {
+  :deep(.el-tag) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    line-height: 1;
+
+    .el-icon {
+      font-size: 12px;
+      display: inline-flex;
       align-items: center;
-      gap: 4px;
-      
-      .el-icon { font-size: 12px; }
+      line-height: 1;
+
+      svg {
+        display: block;
+      }
     }
   }
 }
@@ -2143,9 +2169,10 @@ function getPermissionCount(permissions: any): number {
   gap: 6px;
 }
 
-/* 套餐卡片grid改为4列 */
+/* 套餐卡片 grid：保持 3 列（与 .limits-grid.compact 默认对齐，
+   避免在 400px 右栏宽度下 4 列挤压标签换行） */
 .limits-grid {
-  grid-template-columns: repeat(4, 1fr) !important;
+  grid-template-columns: repeat(3, 1fr) !important;
 }
 
 /* 权限标签 */
@@ -2325,7 +2352,7 @@ function getPermissionCount(permissions: any): number {
 /* 主布局：基础信息 + 订阅套餐 */
 .main-info-layout {
   display: grid;
-  grid-template-columns: 1fr 340px;
+  grid-template-columns: 1fr 400px;
   gap: 16px;
   margin-bottom: 16px;
   

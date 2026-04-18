@@ -4,7 +4,7 @@
 
 use crate::commands::api_commands::{ensure_valid_token, ensure_valid_token_with_force, is_401_error};
 use crate::repository::DataStore;
-use crate::services::WindsurfService;
+use crate::services::{AuthContext, WindsurfService};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -35,9 +35,9 @@ pub async fn get_team_members(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.get_team_members(&token, group_id.as_deref())
+        let result = windsurf_service.get_team_members(&ctx, group_id.as_deref())
             .await
             .map_err(|e| e.to_string())?;
         
@@ -77,9 +77,9 @@ pub async fn invite_team_members(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.grant_preapproval(&token, user_tuples.clone())
+        let result = windsurf_service.grant_preapproval(&ctx, user_tuples.clone())
             .await
             .map_err(|e| e.to_string())?;
         
@@ -111,9 +111,9 @@ pub async fn remove_team_member(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.remove_user_from_team(&token, &member_api_key)
+        let result = windsurf_service.remove_user_from_team(&ctx, &member_api_key)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -145,9 +145,9 @@ pub async fn revoke_invitation(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.revoke_preapproval(&token, &approval_id)
+        let result = windsurf_service.revoke_preapproval(&ctx, &approval_id)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -178,9 +178,9 @@ pub async fn get_pending_invitations(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.get_preapprovals(&token)
+        let result = windsurf_service.get_preapprovals(&ctx)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -211,9 +211,9 @@ pub async fn get_my_pending_invitation(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.get_preapproval_for_user(&token)
+        let result = windsurf_service.get_preapproval_for_user(&ctx)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -244,13 +244,13 @@ pub async fn accept_invitation(
     
     ensure_valid_token(&store, &mut account, uuid).await?;
     
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     let windsurf_service = WindsurfService::new();
     
     // 如果没有提供 approval_id，先获取最新的待处理邀请
     let actual_approval_id = if approval_id.is_empty() {
-        let preapproval_result = windsurf_service.get_preapproval_for_user(&token)
+        let preapproval_result = windsurf_service.get_preapproval_for_user(&ctx)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -282,7 +282,7 @@ pub async fn accept_invitation(
         approval_id
     };
     
-    let result = windsurf_service.accept_preapproval(&token, &actual_approval_id)
+    let result = windsurf_service.accept_preapproval(&ctx, &actual_approval_id)
         .await
         .map_err(|e| e.to_string())?;
     
@@ -306,9 +306,9 @@ pub async fn reject_invitation(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.reject_preapproval(&token, &approval_id)
+        let result = windsurf_service.reject_preapproval(&ctx, &approval_id)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -374,9 +374,9 @@ pub async fn approve_team_join_request(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.update_user_team_status(&token, &user_api_key, status)
+        let result = windsurf_service.update_user_team_status(&ctx, &user_api_key, status)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -409,9 +409,9 @@ pub async fn get_credit_top_up_settings(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.get_credit_top_up_settings(&token)
+        let result = windsurf_service.get_credit_top_up_settings(&ctx)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -445,10 +445,10 @@ pub async fn update_credit_top_up_settings(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
         let result = windsurf_service.update_credit_top_up_settings(
-            &token,
+            &ctx,
             enabled,
             monthly_top_up_amount,
             top_up_increment
@@ -487,9 +487,9 @@ pub async fn update_codeium_access(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.update_codeium_access(&token, &member_api_key, disable_access)
+        let result = windsurf_service.update_codeium_access(&ctx, &member_api_key, disable_access)
             .await
             .map_err(|e| e.to_string())?;
         
@@ -523,9 +523,9 @@ pub async fn add_user_role(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.add_user_role(&token, &member_api_key, &role, group_id.as_deref())
+        let result = windsurf_service.add_user_role(&ctx, &member_api_key, &role, group_id.as_deref())
             .await
             .map_err(|e| e.to_string())?;
         
@@ -559,9 +559,9 @@ pub async fn remove_user_role(
         
         ensure_valid_token_with_force(&store, &mut account, uuid, retry > 0).await?;
         
-        let token = account.token.ok_or("No token available")?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
         
-        let result = windsurf_service.remove_user_role(&token, &member_api_key, &role, group_id.as_deref())
+        let result = windsurf_service.remove_user_role(&ctx, &member_api_key, &role, group_id.as_deref())
             .await
             .map_err(|e| e.to_string())?;
         
@@ -593,11 +593,11 @@ pub async fn transfer_subscription(
     
     ensure_valid_token(&store, &mut account, uuid).await?;
     
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     let windsurf_service = WindsurfService::new();
     
     // Step 1: 获取当前用户信息
-    let current_user = windsurf_service.get_current_user(&token)
+    let current_user = windsurf_service.get_current_user(&ctx)
         .await
         .map_err(|e| format!("获取当前用户信息失败: {}", e))?;
     
@@ -609,13 +609,13 @@ pub async fn transfer_subscription(
         .to_string();
     
     // Step 2: 禁用自己的访问权限
-    let _ = windsurf_service.update_codeium_access(&token, &current_api_key, true)
+    let _ = windsurf_service.update_codeium_access(&ctx, &current_api_key, true)
         .await
         .map_err(|e| format!("禁用访问权限失败: {}", e))?;
     
     // Step 3: 邀请目标用户
     let users = vec![(target_name.clone(), target_email.clone())];
-    let _ = windsurf_service.grant_preapproval(&token, users)
+    let _ = windsurf_service.grant_preapproval(&ctx, users)
         .await
         .map_err(|e| format!("邀请用户失败: {}", e))?;
     
@@ -632,9 +632,9 @@ pub async fn transfer_subscription(
         // 确保目标账户的 token 有效
         let target_uuid = target_acc.id;
         if let Ok(_) = ensure_valid_token(&store, &mut target_acc, target_uuid).await {
-            if let Some(target_token) = &target_acc.token {
+            if let Ok(target_ctx) = AuthContext::from_account(&target_acc) {
                 // 获取目标用户的待处理邀请
-                if let Ok(preapproval_result) = windsurf_service.get_preapproval_for_user(target_token).await {
+                if let Ok(preapproval_result) = windsurf_service.get_preapproval_for_user(&target_ctx).await {
                     // 解析 approval_id，路径: data.subMesssage_1.string_1
                     if let Some(approval_id) = preapproval_result.get("data")
                         .and_then(|d| d.get("subMesssage_1"))
@@ -642,7 +642,7 @@ pub async fn transfer_subscription(
                         .and_then(|id| id.as_str()) 
                     {
                         // 自动接受邀请
-                        let _ = windsurf_service.accept_preapproval(target_token, approval_id).await;
+                        let _ = windsurf_service.accept_preapproval(&target_ctx, approval_id).await;
                     }
                 }
             }
@@ -656,7 +656,7 @@ pub async fn transfer_subscription(
     for retry in 0..3 {
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         
-        let members = windsurf_service.get_team_members(&token, None)
+        let members = windsurf_service.get_team_members(&ctx, None)
             .await
             .map_err(|e| format!("获取团队成员失败: {}", e))?;
         
@@ -691,12 +691,12 @@ pub async fn transfer_subscription(
     
     if let Some(api_key) = target_api_key {
         // Step 6: 授予管理员权限
-        let _ = windsurf_service.add_user_role(&token, &api_key, "root.admin", None)
+        let _ = windsurf_service.add_user_role(&ctx, &api_key, "root.admin", None)
             .await
             .map_err(|e| format!("授予管理员权限失败: {}", e))?;
         
         // Step 7: 移除自己
-        let _ = windsurf_service.remove_user_from_team(&token, &current_api_key)
+        let _ = windsurf_service.remove_user_from_team(&ctx, &current_api_key)
             .await
             .map_err(|e| format!("移除自己失败: {}", e))?;
         

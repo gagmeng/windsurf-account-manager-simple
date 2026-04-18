@@ -104,6 +104,8 @@ pub struct Settings {
     pub test_mode_last_bin: Option<String>,  // 测试模式下上次使用的BIN（用于顺序遍历）
     #[serde(default, rename = "seamlessSwitchEnabled")]
     pub seamless_switch_enabled: bool,  // 是否启用无感换号
+    #[serde(default = "default_windsurf_client_type", rename = "windsurfClientType")]
+    pub windsurf_client_type: String,  // 客户端类型: "windsurf" 或 "windsurf-next"
     #[serde(default, rename = "windsurfPath")]
     pub windsurf_path: Option<String>,  // Windsurf安装路径
     #[serde(default, rename = "patchBackupPath")]
@@ -120,12 +122,14 @@ pub struct Settings {
     pub proxy_enabled: bool,  // 是否启用代理
     #[serde(default, rename = "proxyUrl")]
     pub proxy_url: Option<String>,  // 代理地址 (如 http://127.0.0.1:7890)
-    #[serde(default, rename = "useLightweightApi")]
+    #[serde(default = "default_use_lightweight_api", rename = "useLightweightApi")]
     pub use_lightweight_api: bool,  // 使用轻量级API(GetPlanStatus)获取配额信息，否则使用GetCurrentUser
     #[serde(default = "default_subscription_plan", rename = "subscriptionPlan")]
-    pub subscription_plan: i32,  // 订阅计划: 1=Teams, 2=Pro
+    pub subscription_plan: i32,  // 订阅计划: 0=Free, 1=Teams, 2=Pro, 3=Enterprise SaaS, 4=Hybrid, 5=Enterprise Self-Hosted, 6=Waitlist Pro, 7=Teams Ultimate, 8=Pro Ultimate, 9=Trial, 10=Enterprise Self-Serve, 11=Enterprise SaaS Pooled, 12=Devin Enterprise, 14=Devin Teams, 15=Devin Teams V2, 16=Devin Pro, 17=Devin Max, 18=Max, 19=Devin Free, 20=Devin Trial
     #[serde(default = "default_payment_period", rename = "paymentPeriod")]
     pub payment_period: i32,  // 支付周期: 1=月付, 2=年付
+    #[serde(default = "default_true", rename = "startTrial")]
+    pub start_trial: bool,  // 是否以试用方式开始订阅
     #[serde(default, rename = "teamName")]
     pub team_name: String,  // Teams 计划的团队名称
     #[serde(default = "default_seat_count", rename = "seatCount")]
@@ -156,6 +160,14 @@ fn default_seat_count() -> i32 {
     1  // 默认1个席位
 }
 
+fn default_use_lightweight_api() -> bool {
+    true
+}
+
+fn default_windsurf_client_type() -> String {
+    "windsurf".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -178,6 +190,7 @@ impl Default for Settings {
             use_local_success_bins: false,  // 默认不使用本地成功BIN池
             test_mode_last_bin: None,  // 测试模式进度
             seamless_switch_enabled: false,  // 默认关闭无感换号
+            windsurf_client_type: "windsurf".to_string(),
             windsurf_path: None,
             patch_backup_path: None,
             auto_open_browser: true,  // 默认自动打开浏览器
@@ -185,10 +198,11 @@ impl Default for Settings {
             privacy_mode: false,  // 默认关闭隐私模式
             unlimited_concurrent_refresh: true,  // 默认开启无限制并发刷新
             proxy_enabled: false,  // 默认关闭代理
-            proxy_url: None,  // 默认无代理地址
-            use_lightweight_api: false,  // 默认关闭轻量级API
+            proxy_url: Some("http://127.0.0.1:7890".to_string()),  // 默认代理地址
+            use_lightweight_api: true,  // 默认开启轻量级API
             subscription_plan: 2,  // 默认 Pro 计划
             payment_period: 1,  // 默认月付
+            start_trial: true,  // 默认开启试用
             team_name: String::new(),  // 默认空团队名称
             seat_count: 1,  // 默认1个席位
         }

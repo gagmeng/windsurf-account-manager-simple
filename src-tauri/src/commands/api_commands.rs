@@ -1,11 +1,21 @@
-use crate::models::{Account, OperationLog, OperationType, OperationStatus};
+use crate::commands::devin_commands::{enrich_account_with_user_info, refresh_devin_session_in_memory};
+use crate::models::{Account, OperationLog, OperationStatus, OperationType};
 use crate::repository::DataStore;
-use crate::services::{AuthService, WindsurfService, UpdateSeatsResult};
+use crate::services::{AuthContext, AuthService, UpdateSeatsResult, WindsurfService};
 use crate::utils::AppError;
 use serde_json::json;
 use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
+
+/// Devin session_token 统一使用的“远期” expires_at（32 天后）
+///
+/// Devin 体系的 session_token 没有显式过期时间，但现有 token 缓存逻辑（`is_token_expired`）
+/// 依赖 `token_expires_at` 字段。此处只设置一个足够远的时间避免被错误认定为过期；真正
+/// 的过期判断依靠 401 错误触发 `force_refresh`。
+fn devin_session_pseudo_expires_at() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::days(32)
+}
 
 /// 确保账户有有效的Token
 /// 优先使用缓存的token，只在过期或不存在时刷新
@@ -19,8 +29,8 @@ pub async fn ensure_valid_token(
 
 /// 检查账号是否为团队所有者（Admin角色）
 /// 通过 GetCurrentUser API 获取 roles 字段判断是否为 root.admin
-pub async fn check_is_team_owner(windsurf_service: &WindsurfService, token: &str, _email: &str) -> bool {
-    if let Ok(user_result) = windsurf_service.get_current_user(token).await {
+pub async fn check_is_team_owner(windsurf_service: &WindsurfService, ctx: &AuthContext, _email: &str) -> bool {
+    if let Ok(user_result) = windsurf_service.get_current_user(ctx).await {
         // 检查 user_info.is_root_admin 字段（由 proto_parser 解析）
         if let Some(user_info) = user_result.get("user_info") {
             if let Some(is_root_admin) = user_info.get("is_root_admin").and_then(|v| v.as_bool()) {
@@ -107,7 +117,23 @@ pub async fn ensure_valid_token_with_force(
     if force_refresh {
         println!("[ensure_valid_token] 强制刷新 token (可能是 401 错误触发)");
     }
-    
+
+    // ==================== Devin 账号分支 ====================
+    // Devin 账号使用 devin_auth1_token 重新换取 session_token，而非 Firebase refresh_token
+    if account.is_devin_account() {
+        let new_token = refresh_devin_session_in_memory(account).await?;
+        let pseudo_expires = devin_session_pseudo_expires_at();
+        account.token_expires_at = Some(pseudo_expires);
+        // 落库：使用 update_account 以同步更新后的 devin_auth1_token / devin_account_id / devin_primary_org_id
+        store
+            .update_account(account.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = new_token; // 仅为打消未使用警告
+        return Ok(());
+    }
+
+    // ==================== Firebase 分支（原有逻辑） ====================
     let auth_service = AuthService::new();
     
     // 优先尝试使用refresh token
@@ -158,7 +184,12 @@ pub async fn login_account(
     let account = store.get_account(uuid)
         .await
         .map_err(|e| e.to_string())?;
-    
+
+    // ==================== Devin 账号分支 ====================
+    if account.is_devin_account() {
+        return login_account_devin(uuid, account, &store).await;
+    }
+
     // 解密密码
     let password = store.get_decrypted_password(uuid)
         .await
@@ -175,6 +206,9 @@ pub async fn login_account(
         .await
         .map_err(|e| e.to_string())?;
     
+    // Firebase 账号分支（Devin 已在函数开头 return），直接用新 token 构造 AuthContext
+    let ctx = AuthContext::firebase(token.clone());
+
     // 获取最新的配额信息
     let windsurf_service = WindsurfService::new();
     let mut updated_account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
@@ -185,7 +219,7 @@ pub async fn login_account(
     
     if settings.use_lightweight_api {
         // 使用轻量级 GetPlanStatus API
-        if let Ok(result) = windsurf_service.get_plan_status(&token).await {
+        if let Ok(result) = windsurf_service.get_plan_status(&ctx).await {
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(plan_status) = result.get("plan_status") {
                     apply_plan_status_to_account(plan_status, &mut updated_account);
@@ -196,7 +230,7 @@ pub async fn login_account(
         }
     } else {
         // 使用完整的 GetCurrentUser API
-        if let Ok(user_info_result) = windsurf_service.get_current_user(&token).await {
+        if let Ok(user_info_result) = windsurf_service.get_current_user(&ctx).await {
             if let Some(user_info) = user_info_result.get("user_info") {
                 // 提取用户基本信息（包含api_key）
                 if let Some(user) = user_info.get("user") {
@@ -252,7 +286,7 @@ pub async fn login_account(
     
     // 如果使用轻量级 API 或者之前没有获取到，需要单独获取 is_team_owner
     if updated_account.is_team_owner.is_none() {
-        let is_team_owner = check_is_team_owner(&windsurf_service, &token, &updated_account.email).await;
+        let is_team_owner = check_is_team_owner(&windsurf_service, &ctx, &updated_account.email).await;
         updated_account.is_team_owner = Some(is_team_owner);
         store.update_account(updated_account.clone()).await
             .map_err(|e| format!("保存账户信息失败: {}", e))?;
@@ -291,7 +325,12 @@ pub async fn refresh_token(
     let account = store.get_account(uuid)
         .await
         .map_err(|e| e.to_string())?;
-    
+
+    // ==================== Devin 账号分支 ====================
+    if account.is_devin_account() {
+        return refresh_token_devin(uuid, account, &store).await;
+    }
+
     // 保留过期时间信息用于参考
     let old_expires_at = account.token_expires_at
         .map(|t| t.to_rfc3339())
@@ -329,6 +368,9 @@ pub async fn refresh_token(
         .await
         .map_err(|e| e.to_string())?;
     
+    // Firebase 账号分支，直接用新 token 构造 AuthContext
+    let ctx = AuthContext::firebase(token.clone());
+
     // 获取最新的配额信息
     let windsurf_service = WindsurfService::new();
     let mut updated_account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
@@ -339,7 +381,7 @@ pub async fn refresh_token(
     
     if settings.use_lightweight_api {
         // 使用轻量级 GetPlanStatus API
-        if let Ok(result) = windsurf_service.get_plan_status(&token).await {
+        if let Ok(result) = windsurf_service.get_plan_status(&ctx).await {
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(plan_status) = result.get("plan_status") {
                     apply_plan_status_to_account(plan_status, &mut updated_account);
@@ -350,7 +392,7 @@ pub async fn refresh_token(
         }
     } else {
         // 使用完整的 GetCurrentUser API
-        if let Ok(user_info_result) = windsurf_service.get_current_user(&token).await {
+        if let Ok(user_info_result) = windsurf_service.get_current_user(&ctx).await {
             if let Some(user_info) = user_info_result.get("user_info") {
                 // 提取用户基本信息（包含api_key）
                 if let Some(user) = user_info.get("user") {
@@ -405,7 +447,7 @@ pub async fn refresh_token(
     
     // 如果使用轻量级 API 或者之前没有获取到，需要单独获取 is_team_owner
     if updated_account.is_team_owner.is_none() {
-        let is_team_owner = check_is_team_owner(&windsurf_service, &token, &updated_account.email).await;
+        let is_team_owner = check_is_team_owner(&windsurf_service, &ctx, &updated_account.email).await;
         updated_account.is_team_owner = Some(is_team_owner);
         store.update_account(updated_account.clone()).await
             .map_err(|e| format!("保存账户信息失败: {}", e))?;
@@ -461,15 +503,12 @@ pub async fn get_plan_status(
     // 确保有有效的Token（优先使用缓存）
     ensure_valid_token(&store, &mut account, uuid).await?;
     
-    // 解密Token
-    let token = store.get_decrypted_token(uuid)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("No token available")?;
+    // 构造 AuthContext（涵盖 Devin 账号的 5 个完整 header）
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 调用GetPlanStatus API
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.get_plan_status(&token)
+    let result = windsurf_service.get_plan_status(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
     
@@ -481,7 +520,7 @@ pub async fn get_plan_status(
             apply_plan_status_to_account(plan_status, &mut updated_account);
             
             // 获取团队成员信息，判断是否为团队所有者（Admin）
-            let is_team_owner = check_is_team_owner(&windsurf_service, &token, &updated_account.email).await;
+            let is_team_owner = check_is_team_owner(&windsurf_service, &ctx, &updated_account.email).await;
             updated_account.is_team_owner = Some(is_team_owner);
             
             // 保存更新后的账户信息
@@ -510,11 +549,8 @@ pub async fn reset_credits(
     // 确保有有效的Token（优先使用缓存）
     ensure_valid_token(&store, &mut account, uuid).await?;
     
-    // 解密Token
-    let token = store.get_decrypted_token(uuid)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("No token available")?;
+    // 构造 AuthContext（涵盖 Devin 账号的 5 个完整 header）
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 获取座位数选项配置
     let settings = store.get_settings().await.map_err(|e| e.to_string())?;
@@ -522,7 +558,7 @@ pub async fn reset_credits(
     
     // 执行积分重置
     let windsurf_service = WindsurfService::new();
-    let result: serde_json::Value = windsurf_service.reset_credits(&token, seat_count, account.last_seat_count, &seat_count_options)
+    let result: serde_json::Value = windsurf_service.reset_credits(&ctx, seat_count, account.last_seat_count, &seat_count_options)
         .await
         .map_err(|e: AppError| e.to_string())?;
     
@@ -567,11 +603,11 @@ pub async fn update_seats(
     ensure_valid_token(&store, &mut account, uuid).await?;
     
     // 使用缓存的或新刷新的Token
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 执行座位更新
     let windsurf_service = WindsurfService::new();
-    let result: UpdateSeatsResult = windsurf_service.update_seats(&token, seat_count, retry_times)
+    let result: UpdateSeatsResult = windsurf_service.update_seats(&ctx, seat_count, retry_times)
         .await
         .map_err(|e: AppError| e.to_string())?;
     
@@ -640,11 +676,11 @@ pub async fn get_billing(
     ensure_valid_token(&store, &mut account, uuid).await?;
     
     // 使用缓存的或新刷新的Token
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 获取账单信息
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.get_team_billing(&token)
+    let result = windsurf_service.get_team_billing(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
     
@@ -681,23 +717,19 @@ pub async fn cancel_subscription(
 ) -> Result<serde_json::Value, String> {
     let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
 
-    // 获取Token
-    let token = store.get_decrypted_token(uuid)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("No token available")?;
+    // 获取账号信息并构造 AuthContext（支持 Devin 5-header 的 完整鉴权）
+    let account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     // 取消订阅
     let windsurf_service = WindsurfService::new();
-    let result: serde_json::Value = windsurf_service.cancel_plan(&token, &reason)
+    let result: serde_json::Value = windsurf_service.cancel_plan(&ctx, &reason)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
-    // 获取账号信息用于日志记录
-    let account = store.get_account(uuid).await.ok();
-
-    // 记录日志
-    if let Some(acc) = &account {
+    // 记录日志直接复用之前获取的 account
+    {
+        let acc = &account;
         let log = OperationLog::new(
             OperationType::UpdatePlan, // 使用 UpdatePlan 类型，因为这也是订阅管理操作
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -729,23 +761,19 @@ pub async fn resume_subscription(
 ) -> Result<serde_json::Value, String> {
     let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
 
-    // 获取Token
-    let token = store.get_decrypted_token(uuid)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("No token available")?;
+    // 获取账号信息并构造 AuthContext（支持 Devin 5-header 的 完整鉴权）
+    let account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     // 恢复订阅
     let windsurf_service = WindsurfService::new();
-    let result: serde_json::Value = windsurf_service.resume_plan(&token)
+    let result: serde_json::Value = windsurf_service.resume_plan(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
-    // 获取账号信息用于日志记录
-    let account = store.get_account(uuid).await.ok();
-
-    // 记录日志
-    if let Some(acc) = &account {
+    // 记录日志直接复用之前获取的 account
+    {
+        let acc = &account;
         let log = OperationLog::new(
             OperationType::UpdatePlan, // 使用 UpdatePlan 类型，因为这也是订阅管理操作
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -778,11 +806,8 @@ async fn reset_credits_internal(
     // 确保有有效的Token（优先使用缓存）
     ensure_valid_token(&store, &mut account, uuid).await?;
     
-    // 解密Token
-    let token = store.get_decrypted_token(uuid)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("No token available")?;
+    // 构造 AuthContext（涵盖 Devin 账号的 5 个完整 header）
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 获取座位数选项配置
     let settings = store.get_settings().await.map_err(|e| e.to_string())?;
@@ -790,7 +815,7 @@ async fn reset_credits_internal(
     
     // 执行积分重置
     let windsurf_service = WindsurfService::new();
-    let result: serde_json::Value = windsurf_service.reset_credits(&token, seat_count, account.last_seat_count, &seat_count_options)
+    let result: serde_json::Value = windsurf_service.reset_credits(&ctx, seat_count, account.last_seat_count, &seat_count_options)
         .await
         .map_err(|e: AppError| e.to_string())?;
     
@@ -832,24 +857,20 @@ pub async fn update_plan(
     let period = payment_period.unwrap_or(1); // 默认月付
     let is_preview = preview.unwrap_or(false); // 默认非预览模式
 
-    // 获取Token
-    let token = store.get_decrypted_token(uuid)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("No token available")?;
+    // 获取账号信息并构造 AuthContext（支持 Devin 5-header 的 完整鉴权）
+    let account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     // 更换订阅计划
     let windsurf_service = WindsurfService::new();
-    let result: serde_json::Value = windsurf_service.update_plan(&token, &plan_type, period, is_preview)
+    let result: serde_json::Value = windsurf_service.update_plan(&ctx, &plan_type, period, is_preview)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
-    // 获取账号信息用于日志记录
-    let account = store.get_account(uuid).await.ok();
+    // 记录日志直接复用之前获取的 account
     let period_name = if period == 2 { "年付" } else { "月付" };
-
-    // 记录日志
-    if let Some(acc) = &account {
+    {
+        let acc = &account;
         let log = OperationLog::new(
             OperationType::UpdatePlan,
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -871,7 +892,7 @@ pub async fn update_plan(
         
         if settings.use_lightweight_api {
             // 使用轻量级 GetPlanStatus API
-            if let Ok(plan_result) = windsurf_service.get_plan_status(&token).await {
+            if let Ok(plan_result) = windsurf_service.get_plan_status(&ctx).await {
                 if plan_result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                     if let Some(plan_status) = plan_result.get("plan_status") {
                         apply_plan_status_to_account(plan_status, &mut updated_account);
@@ -882,7 +903,7 @@ pub async fn update_plan(
             }
         } else {
             // 使用完整的 GetCurrentUser API
-            if let Ok(user_info_result) = windsurf_service.get_current_user(&token).await {
+            if let Ok(user_info_result) = windsurf_service.get_current_user(&ctx).await {
                 if let Some(user_info) = user_info_result.get("user_info") {
                     // 提取用户基本信息（包含api_key）
                     if let Some(user) = user_info.get("user") {
@@ -969,7 +990,7 @@ fn get_current_user_internal<'a>(
     ensure_valid_token_with_force(&store, &mut account, uuid, is_retry).await?;
     
     // 使用缓存的或新刷新的Token
-    let token = account.token.clone().ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 读取设置，判断使用哪个 API
     let settings = store.get_settings().await.map_err(|e| e.to_string())?;
@@ -983,7 +1004,7 @@ fn get_current_user_internal<'a>(
         // 使用轻量级 GetPlanStatus API
         println!("[get_current_user] Using GetPlanStatus API");
         
-        let result = windsurf_service.get_plan_status(&token)
+        let result = windsurf_service.get_plan_status(&ctx)
             .await
             .map_err(|e: AppError| e.to_string())?;
         
@@ -1056,7 +1077,7 @@ fn get_current_user_internal<'a>(
         // 使用完整的 GetCurrentUser API
         println!("[get_current_user] Using GetCurrentUser API");
         
-        let result: serde_json::Value = windsurf_service.get_current_user(&token)
+        let result: serde_json::Value = windsurf_service.get_current_user(&ctx)
             .await
             .map_err(|e: AppError| e.to_string())?;
         
@@ -1149,28 +1170,57 @@ pub async fn get_account_info(
     ensure_valid_token(&store, &mut account, uuid).await?;
     
     // 使用缓存的或新刷新的Token
-    let token = account.token.ok_or("No token available")?;
-    
-    // 使用AuthService获取Firebase账户信息
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+
+    let local_info = json!({
+        "id": account.id,
+        "email": account.email,
+        "nickname": account.nickname,
+        "group": account.group,
+        "tags": account.tags,
+        "created_at": account.created_at,
+        "last_login_at": account.last_login_at,
+        "last_seat_count": account.last_seat_count,
+        "token_expires_at": account.token_expires_at,
+        "status": account.status,
+        "auth_provider": account.auth_provider,
+    });
+
+    // ==================== Devin 账号分支 ====================
+    // Devin 账号不持有 Firebase idToken，不能调 accounts:lookup；改走 Windsurf GetCurrentUser
+    if account.is_devin_account() {
+        let windsurf_service = WindsurfService::new();
+        let user_info_result = windsurf_service
+            .get_current_user(&ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        return Ok(json!({
+            "success": true,
+            "auth_provider": "devin",
+            "local_info": local_info,
+            "firebase_info": serde_json::Value::Null,
+            "devin_info": {
+                "devin_account_id": account.devin_account_id,
+                "devin_primary_org_id": account.devin_primary_org_id,
+                "has_auth1_token": account.devin_auth1_token.is_some(),
+                "user_info": user_info_result.get("user_info").cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            }
+        }));
+    }
+
+    // ==================== Firebase 分支（原有逻辑） ====================
+    // AuthService 是 Firebase 专属的 Google Identity API，仅需 idToken
     let auth_service = AuthService::new();
-    let account_info = auth_service.get_account_info(&token)
+    let account_info = auth_service.get_account_info(&ctx.token)
         .await
         .map_err(|e| e.to_string())?;
     
     Ok(json!({
         "success": true,
-        "local_info": {
-            "id": account.id,
-            "email": account.email,
-            "nickname": account.nickname,
-            "group": account.group,
-            "tags": account.tags,
-            "created_at": account.created_at,
-            "last_login_at": account.last_login_at,
-            "last_seat_count": account.last_seat_count,
-            "token_expires_at": account.token_expires_at,
-            "status": account.status
-        },
+        "auth_provider": account.auth_provider.clone().unwrap_or_else(|| "firebase".to_string()),
+        "local_info": local_info,
         "firebase_info": {
             "localId": account_info.local_id,
             "email": account_info.email,
@@ -1185,6 +1235,168 @@ pub async fn get_account_info(
             "lastRefreshAt": account_info.last_refresh_at,
             "providerUserInfo": account_info.provider_user_info
         }
+    }))
+}
+
+// ============================================================================
+// Devin 账号专用的内部辅助函数
+// ============================================================================
+
+/// Devin 账号版的 `login_account`：使用 auth1_token 重新换取 session_token + enrich
+async fn login_account_devin(
+    uuid: Uuid,
+    mut account: Account,
+    store: &Arc<DataStore>,
+) -> Result<serde_json::Value, String> {
+    let new_token = refresh_devin_session_in_memory(&mut account).await?;
+    account.token_expires_at = Some(devin_session_pseudo_expires_at());
+    account.status = crate::models::account::AccountStatus::Active;
+    account.last_login_at = Some(chrono::Utc::now());
+
+    // 拉取最新用户信息
+    enrich_account_with_user_info(&mut account, &new_token).await;
+
+    // is_team_owner：refresh_devin_session_in_memory 已更新 account 的 Devin 字段，此时构造的 ctx 具备完整 5-header
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+    let windsurf_service = WindsurfService::new();
+    if account.is_team_owner.is_none() {
+        let is_team_owner =
+            check_is_team_owner(&windsurf_service, &ctx, &account.email).await;
+        account.is_team_owner = Some(is_team_owner);
+    }
+
+    store
+        .update_account(account.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 日志
+    let log = OperationLog::new(
+        OperationType::Login,
+        OperationStatus::Success,
+        format!("Devin 账号会话刷新成功: {}", account.email),
+    )
+    .with_account(uuid, account.email.clone());
+    let _ = store.add_log(log).await;
+
+    Ok(json!({
+        "success": true,
+        "auth_provider": "devin",
+        "expires_at": account.token_expires_at.map(|t| t.to_rfc3339()),
+        "plan_name": account.plan_name,
+        "used_quota": account.used_quota,
+        "total_quota": account.total_quota,
+        "subscription_expires_at": account.subscription_expires_at.map(|dt| dt.to_rfc3339()),
+        "is_disabled": account.is_disabled,
+        "is_team_owner": account.is_team_owner,
+    }))
+}
+
+/// Devin 账号版的 `refresh_token` 命令主体
+async fn refresh_token_devin(
+    uuid: Uuid,
+    mut account: Account,
+    store: &Arc<DataStore>,
+) -> Result<serde_json::Value, String> {
+    let new_token = refresh_devin_session_in_memory(&mut account).await?;
+    account.token_expires_at = Some(devin_session_pseudo_expires_at());
+    account.status = crate::models::account::AccountStatus::Active;
+
+    // refresh_devin_session_in_memory 已同步更新 account 的所有 Devin 字段，此时构造的 ctx 具备完整 5-header
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+
+    // 读取设置，判断使用哪个 API
+    let settings = store.get_settings().await.map_err(|e| e.to_string())?;
+    let windsurf_service = WindsurfService::new();
+
+    if settings.use_lightweight_api {
+        if let Ok(result) = windsurf_service.get_plan_status(&ctx).await {
+            if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if let Some(plan_status) = result.get("plan_status") {
+                    apply_plan_status_to_account(plan_status, &mut account);
+                }
+            }
+        }
+    } else {
+        enrich_account_with_user_info(&mut account, &new_token).await;
+    }
+
+    if account.is_team_owner.is_none() {
+        let is_team_owner =
+            check_is_team_owner(&windsurf_service, &ctx, &account.email).await;
+        account.is_team_owner = Some(is_team_owner);
+    }
+
+    store
+        .update_account(account.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let log = OperationLog::new(
+        OperationType::RefreshToken,
+        OperationStatus::Success,
+        format!("Devin 账号 Token 刷新成功: {}", account.email),
+    )
+    .with_account(uuid, account.email.clone());
+    let _ = store.add_log(log).await;
+
+    Ok(json!({
+        "success": true,
+        "auth_provider": "devin",
+        "message": "Devin 会话刷新成功",
+        "expires_at": account.token_expires_at.map(|t| t.to_rfc3339()),
+        "plan_name": account.plan_name,
+        "used_quota": account.used_quota,
+        "total_quota": account.total_quota,
+    }))
+}
+
+/// Devin 账号版的 `refresh_token_internal`（为批量刷新服务）
+async fn refresh_token_internal_devin(
+    account: &mut Account,
+    store: &Arc<DataStore>,
+    use_lightweight_api: bool,
+    save_immediately: bool,
+) -> Result<serde_json::Value, String> {
+    let new_token = refresh_devin_session_in_memory(account).await?;
+    account.token_expires_at = Some(devin_session_pseudo_expires_at());
+
+    // refresh_devin_session_in_memory 已更新 account 的 Devin 字段，此时 ctx 具备完整 5-header
+    let ctx = AuthContext::from_account(account).map_err(|e| e.to_string())?;
+
+    let windsurf_service = WindsurfService::new();
+    if use_lightweight_api {
+        if let Ok(result) = windsurf_service.get_plan_status(&ctx).await {
+            if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if let Some(plan_status) = result.get("plan_status") {
+                    apply_plan_status_to_account(plan_status, account);
+                }
+            }
+        }
+    } else {
+        enrich_account_with_user_info(account, &new_token).await;
+    }
+
+    if account.is_team_owner.is_none() {
+        let is_team_owner =
+            check_is_team_owner(&windsurf_service, &ctx, &account.email).await;
+        account.is_team_owner = Some(is_team_owner);
+    }
+
+    if save_immediately {
+        store
+            .update_account(account.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(json!({
+        "success": true,
+        "auth_provider": "devin",
+        "message": "Devin 会话刷新成功",
+        "plan_name": account.plan_name,
+        "used_quota": account.used_quota,
+        "total_quota": account.total_quota,
     }))
 }
 
@@ -1203,11 +1415,11 @@ pub async fn get_team_credit_entries(
     // 确保有有效的Token
     ensure_valid_token(&store, &mut account, uuid).await?;
     
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     
     // 调用GetTeamCreditEntries API
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.get_team_credit_entries(&token)
+    let result = windsurf_service.get_team_credit_entries(&ctx)
         .await
         .map_err(|e| e.to_string())?;
     
@@ -1370,7 +1582,19 @@ async fn refresh_token_internal(
 ) -> Result<serde_json::Value, String> {
     let uuid = Uuid::parse_str(id).map_err(|e| e.to_string())?;
     
-    let account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+
+    // ==================== Devin 账号分支 ====================
+    if account.is_devin_account() {
+        return refresh_token_internal_devin(
+            &mut account,
+            store,
+            use_lightweight_api,
+            save_immediately,
+        )
+        .await;
+    }
+
     let auth_service = AuthService::new();
     
     // 刷新 token
@@ -1396,13 +1620,16 @@ async fn refresh_token_internal(
             .await.map_err(|e| e.to_string())?;
     }
     
+    // Firebase 账号分支，直接用新 token 构造 AuthContext
+    let ctx = AuthContext::firebase(token.clone());
+
     // 获取配额信息
     let windsurf_service = WindsurfService::new();
     let mut updated_account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
     
     if use_lightweight_api {
         // 使用轻量级 GetPlanStatus API
-        if let Ok(result) = windsurf_service.get_plan_status(&token).await {
+        if let Ok(result) = windsurf_service.get_plan_status(&ctx).await {
             if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(plan_status) = result.get("plan_status") {
                     apply_plan_status_to_account(plan_status, &mut updated_account);
@@ -1411,7 +1638,7 @@ async fn refresh_token_internal(
         }
     } else {
         // 使用完整的 GetCurrentUser API
-        if let Ok(user_info_result) = windsurf_service.get_current_user(&token).await {
+        if let Ok(user_info_result) = windsurf_service.get_current_user(&ctx).await {
             if let Some(user_info) = user_info_result.get("user_info") {
                 // 提取用户基本信息（包含api_key）
                 if let Some(user) = user_info.get("user") {
@@ -1464,7 +1691,7 @@ async fn refresh_token_internal(
     
     // 如果使用轻量级 API，需要单独获取 is_team_owner
     if updated_account.is_team_owner.is_none() {
-        if let Ok(user_result) = windsurf_service.get_current_user(&token).await {
+        if let Ok(user_result) = windsurf_service.get_current_user(&ctx).await {
             if let Some(user_info) = user_result.get("user_info") {
                 let is_root_admin = user_info.get("is_root_admin")
                     .and_then(|v| v.as_bool())
@@ -1508,7 +1735,7 @@ async fn refresh_token_internal(
 /// * `payment_period` - 支付周期: 1=月付, 2=年付
 /// * `team_name` - 团队名称 (仅 Teams/Enterprise 需要)
 /// * `seat_count` - 席位数量 (仅 Teams/Enterprise 需要)
-/// * `turnstile_token` - Turnstile 验证令牌 (Pro 需要)
+/// * `turnstile_token` - Turnstile 验证令牌 (start_trial=true 时所有计划均必需)
 ///
 /// # Returns
 /// 返回包含Stripe Checkout链接的JSON对象
@@ -1517,6 +1744,7 @@ pub async fn get_trial_payment_link(
     id: String,
     teams_tier: Option<i32>,
     payment_period: Option<i32>,
+    start_trial: Option<bool>,
     team_name: Option<String>,
     seat_count: Option<i32>,
     turnstile_token: Option<String>,
@@ -1532,18 +1760,20 @@ pub async fn get_trial_payment_link(
     // 确保有有效的Token
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     // 默认值
     let final_teams_tier = teams_tier.unwrap_or(2); // 默认 Pro
     let final_payment_period = payment_period.unwrap_or(1); // 默认月付
+    let final_start_trial = start_trial.unwrap_or(true); // 默认开启试用
 
     // 调用Windsurf API获取支付链接
     let windsurf_service = WindsurfService::new();
     let result = windsurf_service.subscribe_to_plan(
-        &token, 
+        &ctx, 
         final_teams_tier,
         final_payment_period,
+        final_start_trial,
         team_name.as_deref(),
         seat_count,
         turnstile_token.as_deref()
@@ -1597,11 +1827,11 @@ pub async fn get_team_config(
     // 确保有有效的Token
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     // 调用API获取团队配置
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.get_team_config(&token)
+    let result = windsurf_service.get_team_config(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
@@ -1625,11 +1855,11 @@ pub async fn update_team_config(
     // 确保有有效的Token
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     // 调用API更新团队配置
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.update_team_config(&token, config)
+    let result = windsurf_service.update_team_config(&ctx, config)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
@@ -1665,10 +1895,10 @@ pub async fn get_cascade_model_configs(
 
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.get_cascade_model_configs(&token)
+    let result = windsurf_service.get_cascade_model_configs(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
@@ -1689,10 +1919,10 @@ pub async fn get_command_model_configs(
 
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.get_command_model_configs(&token)
+    let result = windsurf_service.get_command_model_configs(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
@@ -1713,10 +1943,10 @@ pub async fn get_team_organizational_controls(
 
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.get_team_organizational_controls(&token)
+    let result = windsurf_service.get_team_organizational_controls(&ctx)
         .await
         .map_err(|e: AppError| e.to_string())?;
 
@@ -1741,11 +1971,11 @@ pub async fn upsert_team_organizational_controls(
 
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.ok_or("No token available")?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
     let windsurf_service = WindsurfService::new();
     let result = windsurf_service.upsert_team_organizational_controls(
-        &token,
+        &ctx,
         &team_id,
         cascade_models,
         command_models,
@@ -1804,8 +2034,8 @@ pub async fn delete_windsurf_user(
     // 确保有有效的Token
     ensure_valid_token(&store, &mut account, uuid).await?;
 
-    let token = account.token.clone().unwrap_or_default();
-    if token.is_empty() {
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+    if ctx.token.is_empty() {
         return Err("账号没有有效的 Token".to_string());
     }
 
@@ -1819,7 +2049,7 @@ pub async fn delete_windsurf_user(
 
     // 调用 DeleteUser API
     let windsurf_service = WindsurfService::new();
-    let result = windsurf_service.delete_user(&token, &api_key)
+    let result = windsurf_service.delete_user(&ctx, &api_key)
         .await
         .map_err(|e: AppError| e.to_string())?;
 

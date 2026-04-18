@@ -235,11 +235,12 @@ const emit = defineEmits<{
 const visible = ref(props.modelValue);
 
 // 所有可用的订阅计划类型
-type PlanType = 'teams' | 'pro' | 'enterprise_saas' | 'hybrid' | 'enterprise_self_hosted' | 'waitlist_pro' | 'teams_ultimate' | 'pro_ultimate' | 'trial' | 'enterprise_self_serve' | 'enterprise_saas_pooled' | '';
+type PlanType = 'free' | 'teams' | 'pro' | 'enterprise_saas' | 'hybrid' | 'enterprise_self_hosted' | 'waitlist_pro' | 'teams_ultimate' | 'pro_ultimate' | 'trial' | 'enterprise_self_serve' | 'enterprise_saas_pooled' | 'devin_enterprise' | 'devin_teams' | 'devin_teams_v2' | 'devin_pro' | 'devin_max' | 'max' | 'devin_free' | 'devin_trial' | '';
 const selectedPlan = ref<PlanType>('');
 
 // 订阅计划配置
 const planConfigs = [
+  { key: 'free', name: 'Free', tier: 0, color: '#6b7280', desc: '免费版' },
   { key: 'teams', name: 'Teams', tier: 1, color: '#10b981', desc: '团队版' },
   { key: 'pro', name: 'Pro', tier: 2, color: '#3b82f6', desc: '专业版' },
   { key: 'enterprise_saas', name: 'Ent SaaS', tier: 3, color: '#8b5cf6', desc: '企业SaaS' },
@@ -251,6 +252,14 @@ const planConfigs = [
   { key: 'trial', name: 'Trial', tier: 9, color: '#84cc16', desc: '试用版' },
   { key: 'enterprise_self_serve', name: 'Ent Self-Serve', tier: 10, color: '#a855f7', desc: '企业自助' },
   { key: 'enterprise_saas_pooled', name: 'Ent Pooled', tier: 11, color: '#0891b2', desc: 'SaaS池化' },
+  { key: 'devin_enterprise', name: 'Devin Ent', tier: 12, color: '#dc2626', desc: 'Devin企业' },
+  { key: 'devin_teams', name: 'Devin Teams', tier: 14, color: '#e11d48', desc: 'Devin团队' },
+  { key: 'devin_teams_v2', name: 'Devin T V2', tier: 15, color: '#be123c', desc: 'Devin团队V2' },
+  { key: 'devin_pro', name: 'Devin Pro', tier: 16, color: '#ea580c', desc: 'Devin专业' },
+  { key: 'devin_max', name: 'Devin Max', tier: 17, color: '#c2410c', desc: 'Devin旗舰' },
+  { key: 'max', name: 'Max', tier: 18, color: '#7c3aed', desc: '旗舰版' },
+  { key: 'devin_free', name: 'Devin Free', tier: 19, color: '#9ca3af', desc: 'Devin免费' },
+  { key: 'devin_trial', name: 'Devin Trial', tier: 20, color: '#f472b6', desc: 'Devin试用' },
 ];
 
 const loopMode = ref(false);

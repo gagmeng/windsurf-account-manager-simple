@@ -7,24 +7,61 @@
     @close="handleClose"
   >
     <div class="import-container">
-      <!-- 导入模式切换 -->
+      <!-- 认证流派（devin_session_token 模式下无关，所以隐藏） -->
+      <div class="mode-section" v-if="importMode !== 'devin_session_token'">
+        <span class="mode-label">认证流派：</span>
+        <el-radio-group v-model="authProvider">
+          <el-radio value="smart">
+            智能识别
+            <el-tag size="small" type="primary" style="margin-left: 4px;">推荐</el-tag>
+          </el-radio>
+          <el-radio value="firebase">Firebase（官方）</el-radio>
+          <el-radio value="devin">Devin（新版）</el-radio>
+        </el-radio-group>
+      </div>
+
+      <!-- 导入模式切换（Devin / 智能不支持 Refresh Token；devin_session_token 仅走 Devin） -->
       <div class="mode-section">
         <span class="mode-label">导入模式：</span>
         <el-radio-group v-model="importMode" @change="handleModeChange">
           <el-radio value="password">邮箱密码</el-radio>
-          <el-radio value="refresh_token">Refresh Token</el-radio>
+          <el-radio value="refresh_token" :disabled="authProvider === 'devin' || authProvider === 'smart'">
+            Refresh Token
+            <span v-if="authProvider === 'devin'" class="mode-hint">(Devin 不适用)</span>
+            <span v-else-if="authProvider === 'smart'" class="mode-hint">(无 email 无法嗅探)</span>
+          </el-radio>
+          <el-radio value="devin_session_token">
+            Devin Session Token
+            <el-tag size="small" type="warning" style="margin-left: 4px;">迁入</el-tag>
+          </el-radio>
         </el-radio-group>
       </div>
 
       <!-- 格式说明 -->
       <el-alert
-        type="info"
+        :type="importMode === 'devin_session_token' ? 'warning' : (authProvider === 'firebase' ? 'info' : 'success')"
         :closable="false"
         show-icon
         style="margin-bottom: 16px;"
       >
         <template #title>
-          <span v-if="importMode === 'password'">每行一个账号，格式：<code>邮箱 密码 备注(可选)</code></span>
+          <span v-if="importMode === 'devin_session_token'">
+            [Devin Session Token] 每行一个 token，格式：<code>devin-session-token$... 备注(可选)</code>。
+            系统逐条调 GetCurrentUser 反查 email / 配额 / api_key 并落库；无效或过期的 token 会归入导入失败。
+          </span>
+          <span v-else-if="importMode === 'password' && authProvider === 'smart'">
+            [智能识别] 每行一个账号，格式：<code>邮箱 密码 备注(可选)</code>。
+            系统对每行并发嗅探 <strong>Firebase</strong> / <strong>Devin Auth1</strong> 并自动分派；
+            SSO / 未设密码 / 未注册的账号会归入导入失败。
+          </span>
+          <span v-else-if="importMode === 'password' && authProvider === 'devin'">
+            [Devin] 每行一个账号，格式：<code>邮箱 密码 备注(可选)</code>。
+            多组织账号将自动选择首个组织完成导入。
+          </span>
+          <span v-else-if="importMode === 'password'">
+            每行一个账号，支持空格或连字符分隔：
+            <code>邮箱 密码 备注(可选)</code> 或 <code>邮箱---密码---备注(可选)</code>
+          </span>
           <span v-else>每行一个 Token，格式：<code>refresh_token 备注(可选)</code></span>
         </template>
       </el-alert>
@@ -32,7 +69,7 @@
       <!-- 输入区域 -->
       <div class="input-section">
         <div class="section-header">
-          <span class="section-title">{{ importMode === 'password' ? '账号数据' : 'Refresh Token 列表' }}</span>
+          <span class="section-title">{{ sectionTitle }}</span>
           <el-button type="primary" link @click="handleFileImport">
             <el-icon><Upload /></el-icon>
             从文件导入
@@ -42,9 +79,7 @@
           v-model="inputText"
           type="textarea"
           :rows="12"
-          :placeholder="importMode === 'password' 
-            ? 'user1@example.com password123 测试账号1\nuser2@example.com password456\nuser3@example.com password789 备注信息'
-            : 'AMf-vBx...长token... 测试账号1\nAMf-vBy...长token...\nAMf-vBz...长token... 备注信息'"
+          :placeholder="inputPlaceholder"
           @input="parseAccounts"
         />
         <input
@@ -196,7 +231,15 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void;
-  (e: 'import', accounts: Array<{ email: string; password: string; remark: string; refreshToken?: string }>, autoLogin: boolean, group: string, tags: string[], mode: 'password' | 'refresh_token'): void;
+  (
+    e: 'import',
+    accounts: Array<{ email: string; password: string; remark: string; refreshToken?: string; sessionToken?: string }>,
+    autoLogin: boolean,
+    group: string,
+    tags: string[],
+    mode: 'password' | 'refresh_token' | 'devin_session_token',
+    authProvider: 'firebase' | 'devin' | 'smart',
+  ): void;
 }>();
 
 const settingsStore = useSettingsStore();
@@ -207,17 +250,63 @@ const visible = computed({
 });
 
 const inputText = ref('');
-const validAccounts = ref<Array<{ email: string; password: string; remark: string; refreshToken?: string }>>([]);
+const validAccounts = ref<Array<{ email: string; password: string; remark: string; refreshToken?: string; sessionToken?: string }>>([]);
 const invalidLines = ref<number[]>([]);
 const autoLogin = ref(true);
 const importing = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const selectedGroup = ref<string>('');
 const selectedTags = ref<string[]>([]);
-const importMode = ref<'password' | 'refresh_token'>('password');
+const importMode = ref<'password' | 'refresh_token' | 'devin_session_token'>('password');
+/// 认证流派：
+/// - `smart`（默认，推荐）：逐行嗅探 Firebase / Devin 自动分派到对应命令
+/// - `firebase`：手动强制走原有 add_account + login_account
+/// - `devin`：手动强制走 add_account_by_devin_login，多组织自动选 orgs[0]
+const authProvider = ref<'firebase' | 'devin' | 'smart'>('smart');
+
+// 切到 Devin / smart 后，Refresh Token 模式不适用（smart 模式因 Token 无 email 无法嗅探）
+// 自动回落到邮箱密码模式并清空输入
+watch(authProvider, (val) => {
+  if ((val === 'devin' || val === 'smart') && importMode.value === 'refresh_token') {
+    importMode.value = 'password';
+    handleModeChange();
+  }
+});
 
 const unlimitedConcurrent = computed(() => settingsStore.settings?.unlimitedConcurrentRefresh || false);
 const concurrencyLimit = computed(() => settingsStore.settings?.concurrent_limit || 5);
+
+// 按当前模式生成输入区的标题与占位符
+const sectionTitle = computed(() => {
+  if (importMode.value === 'devin_session_token') return 'Devin Session Token 列表';
+  return importMode.value === 'password' ? '账号数据' : 'Refresh Token 列表';
+});
+const inputPlaceholder = computed(() => {
+  if (importMode.value === 'password') {
+    return 'user1@example.com password123 测试账号1\nuser2@example.com---password456\nuser3@example.com---password789---备注信息';
+  }
+  if (importMode.value === 'refresh_token') {
+    return 'AMf-vBx...长token... 测试账号1\nAMf-vBy...长token...\nAMf-vBz...长token... 备注信息';
+  }
+  // devin_session_token
+  return 'devin-session-token$eyJhbGciOi... 测试账号1\ndevin-session-token$eyJhbGciOi...\ndevin-session-token$eyJhbGciOi... 备注信息';
+});
+
+/**
+ * 批量导入行切分：同时支持空白分隔与 `---`（3+ 个 `-`）分隔。
+ *
+ * 优先判定是否存在 3+ 个连续 `-`（量阈避免与 emails / refresh_token 中偶发的单/双连字符
+ * 冲突）——存在则按它切；否则回退到空白切分，保证历史格式向后兼容。
+ *
+ * 空段会被过滤（避免连续多个分隔符间的空值干扰后续 parts.length 判定）。
+ */
+function splitLine(line: string): string[] {
+  const trimmed = line.trim();
+  if (/-{3,}/.test(trimmed)) {
+    return trimmed.split(/-{3,}/).map(s => s.trim()).filter(s => s !== '');
+  }
+  return trimmed.split(/\s+/);
+}
 
 // 切换模式时重置
 function handleModeChange() {
@@ -233,9 +322,9 @@ function parseAccounts() {
   invalidLines.value = [];
 
   if (importMode.value === 'password') {
-    // 邮箱密码模式
+    // 邮箱密码模式：支持 `email password remark` 与 `email---password---remark` 两种格式
     lines.forEach((line, index) => {
-      const parts = line.trim().split(/\s+/);
+      const parts = splitLine(line);
       if (parts.length >= 2) {
         const [email, password, ...remarkParts] = parts;
         if (email.includes('@')) {
@@ -251,10 +340,26 @@ function parseAccounts() {
         invalidLines.value.push(index + 1);
       }
     });
+  } else if (importMode.value === 'devin_session_token') {
+    // Devin Session Token 模式：首个非空白段为 session_token，必须以 devin-session-token$ 开头
+    lines.forEach((line, index) => {
+      const parts = splitLine(line);
+      if (parts.length >= 1 && parts[0].startsWith('devin-session-token$')) {
+        const [token, ...remarkParts] = parts;
+        validAccounts.value.push({
+          email: `Session #${index + 1}`, // 实际 email 由后端反查填写；占位用于预览表格
+          password: '',
+          remark: remarkParts.join(' ') || '',
+          sessionToken: token,
+        });
+      } else {
+        invalidLines.value.push(index + 1);
+      }
+    });
   } else {
     // Refresh Token 模式
     lines.forEach((line, index) => {
-      const parts = line.trim().split(/\s+/);
+      const parts = splitLine(line);
       if (parts.length >= 1 && parts[0].length >= 10) {
         const [token, ...remarkParts] = parts;
         validAccounts.value.push({
@@ -304,7 +409,15 @@ function handleFileSelected(event: Event) {
 function handleImport() {
   if (validAccounts.value.length === 0) return;
   importing.value = true;
-  emit('import', [...validAccounts.value], autoLogin.value, selectedGroup.value || '默认分组', [...selectedTags.value], importMode.value);
+  emit(
+    'import',
+    [...validAccounts.value],
+    autoLogin.value,
+    selectedGroup.value || '默认分组',
+    [...selectedTags.value],
+    importMode.value,
+    authProvider.value,
+  );
 }
 
 // 关闭对话框
@@ -316,6 +429,7 @@ function handleClose() {
     selectedGroup.value = '';
     selectedTags.value = [];
     importMode.value = 'password';
+    authProvider.value = 'smart';
     visible.value = false;
   }
 }
@@ -335,6 +449,7 @@ watch(visible, (val) => {
     selectedTags.value = [];
     importing.value = false;
     importMode.value = 'password';
+    authProvider.value = 'smart';
   }
 });
 
@@ -357,6 +472,17 @@ defineExpose({
   padding: 8px 12px;
   background: #f0f9eb;
   border-radius: 6px;
+}
+
+/* 两个 mode-section 并排时的垂直间距 */
+.mode-section + .mode-section {
+  margin-top: 8px;
+}
+
+.mode-hint {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+  margin-left: 4px;
 }
 
 .mode-label {

@@ -169,6 +169,7 @@ pub fn run() {
             commands::create_backup,
             commands::list_backups,
             commands::restore_backup,
+            commands::delete_backup,
             commands::export_data_to_file,
             commands::import_data_from_file,
             commands::get_data_directory,
@@ -209,6 +210,27 @@ pub fn run() {
             commands::get_reset_records,
             commands::get_reset_stats,
             commands::clear_reset_records,
+
+            // Devin Session 账密登录
+            commands::devin_check_connections,
+            commands::devin_password_login,
+            commands::devin_windsurf_post_auth,
+            commands::add_account_by_devin_login,
+            commands::add_account_by_devin_with_org,
+            commands::refresh_devin_session,
+            commands::add_account_by_devin_session_token,
+
+            // 登录流派智能嗅探（方案 B：自动嗅探 + 统一入口）
+            commands::devin_check_user_login_method,
+            commands::sniff_login_method,
+
+            // Devin 邮箱注册 / 无密码邮件登录 / 忘记密码
+            commands::devin_email_start,
+            commands::devin_email_complete,
+            commands::devin_password_reset_start,
+            commands::devin_password_reset_complete,
+            commands::add_account_by_devin_register,
+            commands::add_account_by_devin_email_login,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

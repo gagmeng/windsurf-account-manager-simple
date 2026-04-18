@@ -148,6 +148,91 @@
       <!-- 支付设置标签页 -->
       <el-tab-pane label="支付设置" name="payment">
         <el-form :model="settings" label-width="140px">
+          <el-divider content-position="left">订阅计划设置</el-divider>
+          
+          <el-form-item label="订阅计划">
+            <el-select v-model="settings.subscriptionPlan" style="width: 100%;">
+              <el-option-group label="Windsurf 常用">
+                <el-option label="Pro 专业版" :value="2" />
+                <el-option label="Max 旗舰版" :value="18" />
+                <el-option label="Teams 团队版" :value="1" />
+                <el-option label="Trial 试用版" :value="9" />
+                <el-option label="Free 免费版" :value="0" />
+              </el-option-group>
+              <el-option-group label="Windsurf Ultimate">
+                <el-option label="Pro Ultimate" :value="8" />
+                <el-option label="Teams Ultimate" :value="7" />
+              </el-option-group>
+              <el-option-group label="Enterprise">
+                <el-option label="Enterprise SaaS" :value="3" />
+                <el-option label="Enterprise Self-Serve" :value="10" />
+                <el-option label="Enterprise Self-Hosted" :value="5" />
+                <el-option label="Enterprise SaaS Pooled" :value="11" />
+                <el-option label="Hybrid" :value="4" />
+              </el-option-group>
+              <el-option-group label="Devin">
+                <el-option label="Devin Pro" :value="16" />
+                <el-option label="Devin Max" :value="17" />
+                <el-option label="Devin Teams" :value="14" />
+                <el-option label="Devin Teams V2" :value="15" />
+                <el-option label="Devin Enterprise" :value="12" />
+                <el-option label="Devin Free" :value="19" />
+                <el-option label="Devin Trial" :value="20" />
+              </el-option-group>
+              <el-option-group label="其他">
+                <el-option label="Waitlist Pro" :value="6" />
+              </el-option-group>
+            </el-select>
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              选择要订阅的计划类型，Pro 计划需要完成 Turnstile 人机验证
+            </div>
+          </el-form-item>
+          
+          <el-form-item label="支付周期">
+            <el-select v-model="settings.paymentPeriod" style="width: 100%;">
+              <el-option label="月付" :value="1" />
+              <el-option label="年付" :value="2" />
+            </el-select>
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              年付通常可享受优惠价格
+            </div>
+          </el-form-item>
+          
+          <el-form-item label="开启试用">
+            <el-switch 
+              v-model="settings.startTrial"
+              active-text="开启"
+              inactive-text="关闭"
+            />
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              以试用方式开始订阅，关闭则直接进入付费订阅
+            </div>
+          </el-form-item>
+          
+          <el-form-item label="团队名称" v-if="[1, 3, 4, 5, 7, 10, 11, 12, 14, 15].includes(settings.subscriptionPlan)">
+            <el-input 
+              v-model="settings.teamName" 
+              placeholder="输入团队名称（Teams类计划必填）"
+            />
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              Teams 类计划需要填写团队名称
+            </div>
+          </el-form-item>
+          
+          <el-form-item label="席位数量" v-if="[1, 3, 4, 5, 7, 10, 11, 12, 14, 15].includes(settings.subscriptionPlan)">
+            <el-input-number 
+              v-model="settings.seatCount" 
+              :min="1" 
+              :max="1000"
+              style="width: 100%;"
+            />
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              Teams 计划的席位数量
+            </div>
+          </el-form-item>
+          
+          <el-divider content-position="left">支付页面设置</el-divider>
+          
           <el-form-item label="自动打开支付页面">
             <el-switch 
               v-model="settings.autoOpenPaymentLinkInWebview"
@@ -337,7 +422,18 @@
       <!-- 无感换号标签页 -->
       <el-tab-pane label="无感换号" name="seamless">
         <el-form :model="settings" label-width="140px">
-          <el-form-item label="Windsurf路径">
+          <el-form-item label="客户端类型">
+            <el-select
+              v-model="settings.windsurfClientType"
+              style="width: 200px;"
+              @change="handleClientTypeChange"
+            >
+              <el-option label="Windsurf" value="windsurf" />
+              <el-option label="Windsurf - Next" value="windsurf-next" />
+            </el-select>
+          </el-form-item>
+          
+          <el-form-item label="安装路径">
             <el-input
               v-model="windsurfPath"
               placeholder="请输入或点击自动检测获取路径"
@@ -355,7 +451,7 @@
               </template>
             </el-input>
             <div style="margin-top: 5px; color: #909399; font-size: 12px;">
-              可手动输入路径或从开始菜单自动检测Windsurf安装路径
+              可手动输入路径或从开始菜单自动检测 {{ settings.windsurfClientType === 'windsurf-next' ? 'Windsurf - Next' : 'Windsurf' }} 安装路径
             </div>
           </el-form-item>
           
@@ -393,8 +489,8 @@
           >
             <template #default>
               <div style="font-size: 12px; line-height: 1.6;">
-                <p>🚀 无感换号功能：实现 Windsurf 账号无感切换</p>
-                <p>⚠️ 注意：开启/关闭时会自动重启 Windsurf</p>
+                <p>🚀 无感换号功能：实现 Windsurf / Windsurf - Next 账号无感切换</p>
+                <p>⚠️ 注意：开启/关闭时若客户端正在运行则自动重启，未运行则不重启</p>
               </div>
             </template>
           </el-alert>
@@ -440,6 +536,96 @@
             </template>
           </el-alert>
         </el-form>
+      </el-tab-pane>
+      
+      <!-- 备份设置标签页 -->
+      <el-tab-pane label="备份设置" name="backup">
+        <el-form :model="settings" label-width="140px">
+          <el-form-item label="自动备份">
+            <el-switch v-model="settings.autoBackupEnabled" />
+            <span style="margin-left: 10px; color: #909399; font-size: 12px;">
+              启用后将按设定间隔自动备份数据
+            </span>
+          </el-form-item>
+          
+          <el-form-item label="备份间隔">
+            <el-input-number
+              v-model="settings.backupInterval"
+              :min="1"
+              :max="1440"
+              :step="5"
+              :disabled="!settings.autoBackupEnabled"
+            />
+            <span style="margin-left: 10px; color: #909399;">分钟</span>
+          </el-form-item>
+          
+          <el-form-item label="最大备份数">
+            <el-input-number
+              v-model="settings.backupMaxCount"
+              :min="1"
+              :max="100"
+            />
+            <span style="margin-left: 10px; color: #909399;">份（超出后自动删除最早的备份）</span>
+          </el-form-item>
+          
+          <el-divider content-position="left">手动操作</el-divider>
+          
+          <el-form-item label="立即备份">
+            <el-button type="primary" @click="handleManualBackup" :loading="backupLoading">
+              创建备份
+            </el-button>
+          </el-form-item>
+          
+          <el-form-item label="备份列表">
+            <el-button @click="handleShowBackups" :loading="loadingBackups">
+              查看备份
+            </el-button>
+          </el-form-item>
+          
+          <el-alert type="info" :closable="false" style="margin-top: 15px;">
+            <template #title>
+              <span style="font-weight: bold;">备份说明</span>
+            </template>
+            <template #default>
+              <div style="line-height: 1.8;">
+                <p>备份文件保存在应用数据目录的 <code>backups</code> 文件夹中</p>
+                <p>包含以下数据：账号信息、分组、标签、设置等</p>
+              </div>
+            </template>
+          </el-alert>
+        </el-form>
+        
+        <!-- 备份列表对话框 -->
+        <el-dialog
+          v-model="showBackupsDialog"
+          title="备份列表"
+          width="600px"
+          append-to-body
+        >
+          <el-table :data="backupList" v-loading="loadingBackups" max-height="400">
+            <el-table-column prop="name" label="文件名" />
+            <el-table-column label="大小" width="100">
+              <template #default="{ row }">
+                {{ formatFileSize(row.size) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="180">
+              <template #default="{ row }">
+                {{ formatBackupTime(row.name) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120">
+              <template #default="{ row }">
+                <el-button type="primary" size="small" link @click="handleRestoreBackup(row)">
+                  恢复
+                </el-button>
+                <el-button type="danger" size="small" link @click="handleDeleteBackup(row)">
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-dialog>
       </el-tab-pane>
     </el-tabs>
     
@@ -509,6 +695,7 @@ const settings = reactive<{
   testModeEnabled: boolean;
   useLocalSuccessBins: boolean;
   seamlessSwitchEnabled: boolean;
+  windsurfClientType: 'windsurf' | 'windsurf-next';
   windsurfPath: string | null;
   patchBackupPath: string | null;
   autoOpenBrowser: boolean;
@@ -518,7 +705,15 @@ const settings = reactive<{
   proxyEnabled: boolean;
   proxyUrl: string | null;
   useLightweightApi: boolean;
+  subscriptionPlan: number;
+  paymentPeriod: number;
+  startTrial: boolean;
+  teamName: string;
+  seatCount: number;
   cunzhiEnabled: boolean;
+  autoBackupEnabled: boolean;
+  backupInterval: number;
+  backupMaxCount: number;
 }>({
   auto_refresh_token: true,
   seat_count_options: [18, 19, 20],
@@ -537,6 +732,7 @@ const settings = reactive<{
   testModeEnabled: false,  // 默认关闭测试模式
   useLocalSuccessBins: false,  // 默认不使用本地BIN池
   seamlessSwitchEnabled: false,  // 默认关闭无感换号
+  windsurfClientType: 'windsurf',  // 默认 Windsurf 客户端
   windsurfPath: null,  // Windsurf路径
   patchBackupPath: null,  // 补丁备份路径
   autoOpenBrowser: true,  // 默认自动打开浏览器
@@ -546,8 +742,107 @@ const settings = reactive<{
   proxyEnabled: false,  // 默认关闭代理
   proxyUrl: null,  // 默认无代理地址
   useLightweightApi: true,  // 默认使用轻量级API
+  subscriptionPlan: 2,  // 默认 Pro 计划
+  paymentPeriod: 1,  // 默认月付
+  startTrial: true,  // 默认开启试用
+  teamName: '',  // 默认空团队名称
+  seatCount: 1,  // 默认1个席位
   cunzhiEnabled: false,  // 默认关闭伟哥功能
+  autoBackupEnabled: true,  // 默认启用自动备份
+  backupInterval: 10,  // 默认10分钟
+  backupMaxCount: 10,  // 默认最多10份
 });
+
+// 备份相关
+const backupLoading = ref(false);
+const loadingBackups = ref(false);
+const showBackupsDialog = ref(false);
+const backupList = ref<Array<{ name: string; path: string; size: number }>>([]);
+
+interface BackupInfo {
+  name: string;
+  path: string;
+  size: number;
+}
+
+async function handleManualBackup() {
+  backupLoading.value = true;
+  try {
+    const result = await invoke<{ success: boolean; path: string; message: string }>('create_backup');
+    if (result.success) {
+      ElMessage.success('备份创建成功');
+    }
+  } catch (e: any) {
+    ElMessage.error(`备份失败: ${e}`);
+  } finally {
+    backupLoading.value = false;
+  }
+}
+
+async function handleShowBackups() {
+  loadingBackups.value = true;
+  showBackupsDialog.value = true;
+  try {
+    backupList.value = await invoke<BackupInfo[]>('list_backups');
+  } catch (e: any) {
+    ElMessage.error(`获取备份列表失败: ${e}`);
+    backupList.value = [];
+  } finally {
+    loadingBackups.value = false;
+  }
+}
+
+async function handleRestoreBackup(backup: BackupInfo) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要从备份 "${backup.name}" 恢复数据吗？当前数据将被覆盖（会先自动备份当前数据）。`,
+      '确认恢复',
+      { type: 'warning' }
+    );
+    
+    await invoke('restore_backup', { backupPath: backup.path });
+    ElMessage.success('恢复成功，请刷新页面');
+    showBackupsDialog.value = false;
+    await settingsStore.loadSettings();
+  } catch (e: any) {
+    if (e !== 'cancel') {
+      ElMessage.error(`恢复失败: ${e}`);
+    }
+  }
+}
+
+async function handleDeleteBackup(backup: BackupInfo) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除备份 "${backup.name}" 吗？此操作不可恢复。`,
+      '确认删除',
+      { type: 'warning' }
+    );
+    
+    await invoke('delete_backup', { backupName: backup.name });
+    ElMessage.success('备份已删除');
+    await handleShowBackups();
+  } catch (e: any) {
+    if (e !== 'cancel') {
+      ElMessage.error(`删除失败: ${e}`);
+    }
+  }
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function formatBackupTime(name: string): string {
+  // 从文件名 accounts_20260109_231500.json 提取时间
+  const match = name.match(/accounts_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+  if (match) {
+    return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}`;
+  }
+  return name;
+}
 
 // 成功BIN池相关
 const successBinCount = ref(0);
@@ -733,14 +1028,29 @@ function clearCardBinRange() {
   ElMessage.success('已清除卡段范围');
 }
 
+// 切换客户端类型时清空路径并重新检测
+async function handleClientTypeChange() {
+  windsurfPath.value = '';
+  settings.windsurfPath = null;
+  settings.seamlessSwitchEnabled = false;
+  patchStatus.installed = false;
+  patchStatus.error = '';
+  await settingsStore.updateSettings(settings);
+  // 自动检测新客户端路径
+  await detectWindsurfPath();
+}
+
 // 检测Windsurf路径
 async function detectWindsurfPath() {
   detectingPath.value = true;
+  const clientLabel = settings.windsurfClientType === 'windsurf-next' ? 'Windsurf - Next' : 'Windsurf';
   try {
-    const path = await invoke<string>('get_windsurf_path');
+    const path = await invoke<string>('get_windsurf_path', {
+      clientType: settings.windsurfClientType
+    });
     windsurfPath.value = path;
     settings.windsurfPath = path;
-    ElMessage.success('已找到Windsurf安装路径');
+    ElMessage.success(`已找到 ${clientLabel} 安装路径`);
     // 检查补丁状态
     await checkPatchStatus();
     // 保存路径设置到本地
@@ -820,16 +1130,17 @@ async function browseWindsurfPath() {
 // 处理无感换号开关
 async function handleSeamlessSwitch(value: boolean) {
   if (!windsurfPath.value) {
-    ElMessage.error('请先检测或设置Windsurf路径');
+    ElMessage.error('请先检测或设置客户端路径');
     settings.seamlessSwitchEnabled = !value;
     return;
   }
   
   // 确认对话框
   const action = value ? '开启' : '关闭';
+  const clientLabel = settings.windsurfClientType === 'windsurf-next' ? 'Windsurf - Next' : 'Windsurf';
   const message = value 
-    ? '开启无感换号将修改Windsurf的extension.js文件并重启Windsurf，是否继续？'
-    : '关闭无感换号将还原原始文件并重启Windsurf，是否继续？';
+    ? `开启无感换号将修改 ${clientLabel} 的 extension.js 文件，若客户端正在运行则自动重启，是否继续？`
+    : `关闭无感换号将还原原始文件，若客户端正在运行则自动重启，是否继续？`;
   
   try {
     await ElMessageBox.confirm(

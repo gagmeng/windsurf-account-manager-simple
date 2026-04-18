@@ -65,6 +65,23 @@ pub struct Account {
     // 自定义排序顺序（用于拖拽排序）
     #[serde(default, rename = "sortOrder")]
     pub sort_order: i32,
+
+    // ==================== Devin Session 认证字段 ====================
+    // 当此账号通过 Devin 账密登录时，以下字段会被填充；
+    // 此时 `token` 字段将存放 Devin session_token（与旧 Firebase id_token 共用 token 字段，实现下游 API 透明使用）
+
+    /// Devin Auth1 Token（一级认证令牌，可用于再次换取 session_token）
+    #[serde(default)]
+    pub devin_auth1_token: Option<String>,
+    /// Devin 账号 ID（格式：account-<32 字符十六进制>）
+    #[serde(default)]
+    pub devin_account_id: Option<String>,
+    /// Devin 主组织 ID
+    #[serde(default)]
+    pub devin_primary_org_id: Option<String>,
+    /// 认证提供方："firebase"（默认旧体系）或 "devin"（Devin Session 新体系）
+    #[serde(default)]
+    pub auth_provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +125,16 @@ impl Account {
             weekly_quota_reset_at_unix: None,
             overage_balance_micros: None,
             sort_order: 0,
+            devin_auth1_token: None,
+            devin_account_id: None,
+            devin_primary_org_id: None,
+            auth_provider: None,
         }
+    }
+
+    /// 判断账号是否通过 Devin Session 认证
+    pub fn is_devin_account(&self) -> bool {
+        matches!(self.auth_provider.as_deref(), Some("devin"))
     }
 
     pub fn is_token_valid(&self) -> bool {

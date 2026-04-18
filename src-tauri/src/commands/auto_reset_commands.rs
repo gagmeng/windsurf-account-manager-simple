@@ -1,6 +1,6 @@
 use crate::models::{AutoResetConfig, OperationLog, OperationType, OperationStatus, ResetRecord, AccountResetStats};
 use crate::repository::DataStore;
-use crate::services::WindsurfService;
+use crate::services::{AuthContext, WindsurfService};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -363,22 +363,22 @@ pub async fn check_and_auto_reset(
     
     // 遍历每个主号，获取其团队成员并检测
     for master_account in master_accounts {
-        // 检查主号是否有有效的 token
-        let master_token = match &master_account.token {
-            Some(t) if !t.is_empty() => t.clone(),
+        // 构造主号的 AuthContext（同时校验 token 存在、Devin 账号额外校验 3 个专属字段）
+        let master_ctx = match AuthContext::from_account(&master_account) {
+            Ok(ctx) if !ctx.token.is_empty() => ctx,
             _ => {
                 results.push(json!({
                     "master_account_id": master_account.id,
                     "master_email": master_account.email,
                     "skipped": true,
-                    "reason": "主号无有效Token"
+                    "reason": "主号无有效Token或 Devin 认证字段不完整"
                 }));
                 continue;
             }
         };
         
         // 获取团队成员列表和使用量数据
-        let (team_members, cascade_details) = match windsurf_service.get_team_members(&master_token, None).await {
+        let (team_members, cascade_details) = match windsurf_service.get_team_members(&master_ctx, None).await {
             Ok(result) => {
                 if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                     let data = result.get("data").cloned().unwrap_or(json!({}));
@@ -446,7 +446,7 @@ pub async fn check_and_auto_reset(
         }
         
         // 获取主号的配额信息（只获取一次）
-        let total_quota = match windsurf_service.get_plan_status(&master_token).await {
+        let total_quota = match windsurf_service.get_plan_status(&master_ctx).await {
             Ok(plan_status) => {
                 plan_status.get("plan_status")
                     .and_then(|ps| ps.get("total_quota"))
@@ -497,10 +497,11 @@ pub async fn check_and_auto_reset(
             //   - total_quota = available_flex_credits + available_prompt_credits（这是总配额！）
             //   - remaining = total_quota - used_quota
             let (used_quota, total_member_quota) = if let Some(acc) = member_account {
-                if let Some(member_token) = &acc.token {
-                    if !member_token.is_empty() {
+                // 为成员构造 AuthContext；Devin 成员会自动携带 5 个完整 header
+                if let Ok(member_ctx) = AuthContext::from_account(acc) {
+                    if !member_ctx.token.is_empty() {
                         // 调用 GetPlanStatus API 获取实时数据
-                        match windsurf_service.get_plan_status(member_token).await {
+                        match windsurf_service.get_plan_status(&member_ctx).await {
                             Ok(plan_status) => {
                                 let ps = plan_status.get("plan_status").unwrap_or(&plan_status);
                                 
@@ -586,7 +587,7 @@ pub async fn check_and_auto_reset(
             
             if should_reset {
                 // 执行重置（移除成员再重新邀请）
-                match windsurf_service.reset_member_credits(&master_token, member_api_key, member_name, member_email).await {
+                match windsurf_service.reset_member_credits(&master_ctx, member_api_key, member_name, member_email).await {
                     Ok(reset_result) => {
                         let reset_success = reset_result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
                         
@@ -602,17 +603,17 @@ pub async fn check_and_auto_reset(
                                 acc.email.to_lowercase() == member_email.to_lowercase()
                             }) {
                                 // 尝试使用该账号接受邀请
-                                if let Some(member_token) = &matched_account.token {
-                                    if !member_token.is_empty() {
+                                if let Ok(member_ctx) = AuthContext::from_account(matched_account) {
+                                    if !member_ctx.token.is_empty() {
                                         // 先获取待处理的邀请
-                                        if let Ok(preapproval) = windsurf_service.get_preapproval_for_user(member_token).await {
+                                        if let Ok(preapproval) = windsurf_service.get_preapproval_for_user(&member_ctx).await {
                                             if let Some(approval_id) = preapproval.get("data")
                                                 .and_then(|d| d.get("subMesssage_1"))
                                                 .and_then(|s| s.get("string_1"))
                                                 .and_then(|v| v.as_str()) 
                                             {
                                                 // 接受邀请
-                                                if let Ok(accept_result) = windsurf_service.accept_preapproval(member_token, approval_id).await {
+                                                if let Ok(accept_result) = windsurf_service.accept_preapproval(&member_ctx, approval_id).await {
                                                     auto_join_success = accept_result.get("success")
                                                         .and_then(|v| v.as_bool())
                                                         .unwrap_or(false);
@@ -759,13 +760,13 @@ pub async fn force_reset_config(
     
     // 遍历每个主号，获取其团队成员并重置
     for master_account in master_accounts {
-        let master_token = match &master_account.token {
-            Some(t) if !t.is_empty() => t.clone(),
+        let master_ctx = match AuthContext::from_account(&master_account) {
+            Ok(ctx) if !ctx.token.is_empty() => ctx,
             _ => continue,
         };
         
         // 获取团队成员列表
-        let team_members = match windsurf_service.get_team_members(&master_token, None).await {
+        let team_members = match windsurf_service.get_team_members(&master_ctx, None).await {
             Ok(result) => {
                 if result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
                     let data = result.get("data").cloned().unwrap_or(json!({}));
@@ -814,7 +815,7 @@ pub async fn force_reset_config(
             }
             
             // 执行重置
-            match windsurf_service.reset_member_credits(&master_token, member_api_key, member_name, member_email).await {
+            match windsurf_service.reset_member_credits(&master_ctx, member_api_key, member_name, member_email).await {
                 Ok(reset_result) => {
                     let reset_success = reset_result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
                     
@@ -828,15 +829,15 @@ pub async fn force_reset_config(
                         if let Some(matched_account) = all_accounts.iter().find(|acc| {
                             acc.email.to_lowercase() == member_email.to_lowercase()
                         }) {
-                            if let Some(member_token) = &matched_account.token {
-                                if !member_token.is_empty() {
-                                    if let Ok(preapproval) = windsurf_service.get_preapproval_for_user(member_token).await {
+                            if let Ok(member_ctx) = AuthContext::from_account(matched_account) {
+                                if !member_ctx.token.is_empty() {
+                                    if let Ok(preapproval) = windsurf_service.get_preapproval_for_user(&member_ctx).await {
                                         if let Some(approval_id) = preapproval.get("data")
                                             .and_then(|d| d.get("subMesssage_1"))
                                             .and_then(|s| s.get("string_1"))
                                             .and_then(|v| v.as_str()) 
                                         {
-                                            if let Ok(accept_result) = windsurf_service.accept_preapproval(member_token, approval_id).await {
+                                            if let Ok(accept_result) = windsurf_service.accept_preapproval(&member_ctx, approval_id).await {
                                                 auto_join_success = accept_result.get("success")
                                                     .and_then(|v| v.as_bool())
                                                     .unwrap_or(false);

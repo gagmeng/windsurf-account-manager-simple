@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Account, Settings, OperationLog, UpdateSeatsResult, BillingInfo, BatchResult, GlobalTag, SortField, SortDirection, SortConfig } from '@/types';
+import type { Account, Settings, OperationLog, UpdateSeatsResult, BillingInfo, BatchResult, GlobalTag, SortField, SortDirection, SortConfig, DevinLoginResult, WindsurfOrg, CheckUserLoginMethodResult, LoginMethodSniffResult } from '@/types';
 import type { AnalyticsData } from '@/types/analytics';
 
 // 账号管理API
@@ -219,13 +219,14 @@ export const apiService = {
    * @param paymentPeriod 支付周期: 1=月付, 2=年付
    * @param teamName 团队名称 (仅 Teams/Enterprise 需要)
    * @param seatCount 席位数量 (仅 Teams/Enterprise 需要)
-   * @param turnstileToken Turnstile 验证令牌 (Pro 需要)
+   * @param turnstileToken Turnstile 验证令牌 (startTrial=true 时所有计划均必需)
    * @returns 包含Stripe Checkout链接的响应
    */
   async getTrialPaymentLink(
     id: string, 
     teamsTier?: number,
     paymentPeriod?: number,
+    startTrial?: boolean,
     teamName?: string,
     seatCount?: number,
     turnstileToken?: string
@@ -238,7 +239,7 @@ export const apiService = {
     error?: string;
     timestamp: string;
   }> {
-    return await invoke('get_trial_payment_link', { id, teamsTier, paymentPeriod, teamName, seatCount, turnstileToken });
+    return await invoke('get_trial_payment_link', { id, teamsTier, paymentPeriod, startTrial, teamName, seatCount, turnstileToken });
   },
 
   // === Protobuf解析API（返回解析后的结构化数据） ===
@@ -324,6 +325,8 @@ export const apiService = {
     message?: string;
     auth_token?: string;
     machine_id_reset?: boolean;
+    seamless_patch_active?: boolean;
+    auto_enabled_seamless?: boolean;
     error?: string;
   }> {
     return await invoke('switch_account', { id });
@@ -493,6 +496,146 @@ export const analyticsApi = {
   async getAccountAnalytics(id: string): Promise<AnalyticsData> {
     return await invoke('get_account_analytics', { id });
   }
+};
+
+// Devin Session 认证 API
+export const devinApi = {
+  /**
+   * 登录流派智能嗅探（方案 B 统一入口）
+   *
+   * 后端并发调：
+   * - Firebase 侧 `CheckUserLoginMethod`　（user_exists / is_migrated / has_password 等）
+   * - Devin 侧 `/_devin-auth/connections`　（method / sso_connections 等）
+   *
+   * 返回 `recommended` 字段标注建议的登录流派，前端据此自动分派。
+   */
+  async sniffLoginMethod(email: string): Promise<LoginMethodSniffResult> {
+    return await invoke('sniff_login_method', { email });
+  },
+
+  /**
+   * 单独调用 Firebase 侧 `CheckUserLoginMethod`（调试/明细展示）
+   *
+   * 日常智能登录请直接使用 `sniffLoginMethod`。
+   */
+  async checkUserLoginMethod(email: string): Promise<CheckUserLoginMethodResult> {
+    return await invoke('devin_check_user_login_method', { email });
+  },
+
+  /**
+   * 查询指定邮箱可用的登录方式（可选，用于 UI 预判断）
+   */
+  async checkConnections(email: string): Promise<any> {
+    return await invoke('devin_check_connections', { email });
+  },
+
+  /**
+   * 仅账密登录（底层接口），返回 auth1_token
+   */
+  async passwordLogin(email: string, password: string): Promise<{
+    auth1_token: string;
+    account_id?: string;
+    [key: string]: any;
+  }> {
+    return await invoke('devin_password_login', { email, password });
+  },
+
+  /**
+   * 使用 auth1_token 换取 session_token（底层接口）
+   */
+  async windsurfPostAuth(auth1Token: string, orgId?: string): Promise<{
+    session_token: string;
+    auth1_token?: string;
+    account_id?: string;
+    primary_org_id?: string;
+    orgs: WindsurfOrg[];
+  }> {
+    return await invoke('devin_windsurf_post_auth', { auth1Token, orgId });
+  },
+
+  /**
+   * 完整流程：账密登录 + 建账号（主流程）
+   *
+   * 当账号属于多个组织时，返回 `requires_org_selection=true` + orgs 列表，
+   * UI 需要让用户选择 org 后调用 `addAccountWithOrg`
+   */
+  async addAccountByLogin(params: {
+    email: string;
+    password: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+    orgId?: string;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_login', {
+      email: params.email,
+      password: params.password,
+      nickname: params.nickname,
+      tags: params.tags,
+      group: params.group,
+      orgId: params.orgId,
+    });
+  },
+
+  /**
+   * 多组织场景下的二次选择：在已有 auth1_token 的基础上，指定 org_id 完成账号创建
+   *
+   * `password` 可选：账密流首次选 org 失败后二次调用时传入用户原始密码，让账号卡能回显；
+   * 纯凭证迁入 / 邮箱无密登录场景可省略。
+   */
+  async addAccountWithOrg(params: {
+    email: string;
+    auth1Token: string;
+    orgId: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+    password?: string;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_with_org', {
+      email: params.email,
+      auth1Token: params.auth1Token,
+      orgId: params.orgId,
+      nickname: params.nickname,
+      tags: params.tags,
+      group: params.group,
+      password: params.password ?? null,
+    });
+  },
+
+  /**
+   * 使用已存储的 auth1_token 刷新 session_token
+   */
+  async refreshSession(id: string): Promise<{
+    success: boolean;
+    session_token: string;
+    primary_org_id?: string;
+    message?: string;
+  }> {
+    return await invoke('refresh_devin_session', { id });
+  },
+
+  /**
+   * 通过已有的 `devin-session-token$...` 前缀 session_token 直接导入 Devin 账号
+   *
+   * 适用场景：用户从浏览器 localStorage / cookie 拷出有效 session_token 的迁入路径。
+   * 仅需 `sessionToken`，后端调 GetCurrentUser 反查 email / api_key / 配额等信息。
+   * Devin 扩展字段（account_id / auth1_token / primary_org_id）留空——日常 API 仍可工作，
+   * 仅 `refreshSession` 会失败（到期需用户重新获取 session_token）。
+   */
+  async addAccountBySessionToken(params: {
+    sessionToken: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_session_token', {
+      sessionToken: params.sessionToken,
+      nickname: params.nickname,
+      tags: params.tags,
+      group: params.group,
+    });
+  },
 };
 
 // 系统维护 API

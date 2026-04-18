@@ -261,7 +261,7 @@ import {
   UserFilled, OfficeBuilding, Check, Star, Trophy, CircleClose, CircleCheck, 
   Refresh, SuccessFilled, CircleCloseFilled, DataLine, Warning, InfoFilled, 
   VideoPause, Connection, Monitor, Clock, Medal, Promotion, Briefcase, Calendar, Grid,
-  View, Ticket
+  View, Ticket, Present, StarFilled, Cpu
 } from '@element-plus/icons-vue';
 import type { Component } from 'vue';
 import { apiService } from '@/api';
@@ -280,13 +280,14 @@ const emit = defineEmits<{
 
 const visible = ref(props.modelValue);
 // 所有可用的订阅计划类型
-type PlanType = 'teams' | 'pro' | 'enterprise_saas' | 'hybrid' | 'enterprise_self_hosted' | 'waitlist_pro' | 'teams_ultimate' | 'pro_ultimate' | 'trial' | 'enterprise_self_serve' | 'enterprise_saas_pooled' | '';
+type PlanType = 'free' | 'teams' | 'pro' | 'enterprise_saas' | 'hybrid' | 'enterprise_self_hosted' | 'waitlist_pro' | 'teams_ultimate' | 'pro_ultimate' | 'trial' | 'enterprise_self_serve' | 'enterprise_saas_pooled' | 'devin_enterprise' | 'devin_teams' | 'devin_teams_v2' | 'devin_pro' | 'devin_max' | 'max' | 'devin_free' | 'devin_trial' | '';
 const selectedPlan = ref<PlanType>('');
 // 付款周期: 1=月付, 2=年付
 const paymentPeriod = ref<number>(1);
 
 // 订阅计划配置
 const planConfigs = [
+  { key: 'free', name: 'Free', tier: 0, icon: 'Present', color: '#6b7280', desc: '免费版', features: ['基础功能', '免费使用', '社区支持'] },
   { key: 'teams', name: 'Teams', tier: 1, icon: 'UserFilled', color: '#10b981', desc: '团队版', features: ['团队协作', '多用户管理', '集中计费'] },
   { key: 'pro', name: 'Pro', tier: 2, icon: 'Star', color: '#3b82f6', desc: '专业版', features: ['个人专业版', '高级功能', '优先支持'] },
   { key: 'enterprise_saas', name: 'Enterprise SaaS', tier: 3, icon: 'OfficeBuilding', color: '#8b5cf6', desc: '企业SaaS版', features: ['企业级安全', 'SaaS部署', 'API访问'] },
@@ -298,6 +299,14 @@ const planConfigs = [
   { key: 'trial', name: 'Trial', tier: 9, icon: 'Promotion', color: '#84cc16', desc: '试用版', features: ['限时体验', '全部功能', '无需付费'] },
   { key: 'enterprise_self_serve', name: 'Enterprise Self-Serve', tier: 10, icon: 'Briefcase', color: '#a855f7', desc: '企业自助版', features: ['企业级功能', '自助管理', 'SLA保障'] },
   { key: 'enterprise_saas_pooled', name: 'Enterprise SaaS Pooled', tier: 11, icon: 'Grid', color: '#0891b2', desc: '企业SaaS池化版', features: ['共享资源池', '弹性扩展', '成本优化'] },
+  { key: 'devin_enterprise', name: 'Devin Enterprise', tier: 12, icon: 'Cpu', color: '#dc2626', desc: 'Devin企业版', features: ['AI代理', '企业级', '团队管理'] },
+  { key: 'devin_teams', name: 'Devin Teams', tier: 14, icon: 'Cpu', color: '#e11d48', desc: 'Devin团队版', features: ['AI代理', '团队协作', '多用户'] },
+  { key: 'devin_teams_v2', name: 'Devin Teams V2', tier: 15, icon: 'Cpu', color: '#be123c', desc: 'Devin团队V2', features: ['AI代理', '团队V2', '增强功能'] },
+  { key: 'devin_pro', name: 'Devin Pro', tier: 16, icon: 'Cpu', color: '#ea580c', desc: 'Devin专业版', features: ['AI代理', '专业功能', '个人使用'] },
+  { key: 'devin_max', name: 'Devin Max', tier: 17, icon: 'Cpu', color: '#c2410c', desc: 'Devin旗舰版', features: ['AI代理', '无限功能', '最高配置'] },
+  { key: 'max', name: 'Max', tier: 18, icon: 'StarFilled', color: '#7c3aed', desc: '旗舰版', features: ['最高配置', '无限额度', '全功能解锁'] },
+  { key: 'devin_free', name: 'Devin Free', tier: 19, icon: 'Cpu', color: '#9ca3af', desc: 'Devin免费版', features: ['AI代理', '基础功能', '免费使用'] },
+  { key: 'devin_trial', name: 'Devin Trial', tier: 20, icon: 'Cpu', color: '#f472b6', desc: 'Devin试用版', features: ['AI代理', '限时体验', '全部功能'] },
 ];
 const loading = ref(false);
 const cancelLoading = ref(false);
@@ -306,7 +315,7 @@ const error = ref('');
 
 // 图标组件映射
 const iconMap: Record<string, Component> = {
-  UserFilled, OfficeBuilding, Star, Trophy, Connection, Monitor, Clock, Medal, Promotion, Briefcase, Check, Grid
+  UserFilled, OfficeBuilding, Star, StarFilled, Trophy, Connection, Monitor, Clock, Medal, Promotion, Briefcase, Check, Grid, Present, Cpu
 };
 
 // 获取图标组件

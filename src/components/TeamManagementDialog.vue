@@ -734,6 +734,55 @@ function formatLastUsed(timestamp?: number): string {
   return new Date(time).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
 }
 
+// ==================== update_codeium_access 错误映射 ====================
+
+/**
+ * 后端 Connect Protocol 错误码 → 中文友好提示。
+ *
+ * 这些 code 来自 `update_codeium_access` 命令 400 响应 `parsed_error.code`，
+ * 由 `windsurf_service.rs::update_codeium_access` 在 400 分支解析而来。
+ *
+ * 典型场景：
+ * - `failed_precondition`: Devin 套餐门槛（仅 Teams-v2 支持 Windsurf 访问管理）
+ * - `permission_denied`:   当前账号非团队管理员
+ * - `unauthenticated`:     主认证 token 失效
+ */
+const UPDATE_ACCESS_ERROR_MESSAGES: Record<string, string> = {
+  failed_precondition: '当前 Devin 套餐不支持 Windsurf 访问管理，需升级到 Teams-v2 套餐后使用',
+  permission_denied: '权限不足：仅团队管理员可操作访问权限',
+  unauthenticated: '认证失效，请刷新账号登录状态后重试',
+  invalid_argument: '请求参数无效，成员 API Key 可能已失效',
+  not_found: '目标成员未找到，可能已被移除',
+}
+
+/** 从后端失败返回体中提取一条友好中文错误消息，兜底到服务端原文或通用文案 */
+function extractUpdateAccessErrorMessage(result: any): string {
+  const code = result?.parsed_error?.code as string | undefined
+  const serverMsg = result?.parsed_error?.message as string | undefined
+  const friendly = code ? UPDATE_ACCESS_ERROR_MESSAGES[code] : undefined
+  return friendly || serverMsg || result?.error || '更新访问权限失败'
+}
+
+/**
+ * 调用 `update_codeium_access` 命令；若后端 `success === false` 则抛出带
+ * 友好消息的 Error，便于上层 try/catch 统一用 `ElMessage.error` 呈现。
+ */
+async function invokeUpdateCodeiumAccess(
+  accountId: string,
+  memberApiKey: string,
+  disableAccess: boolean,
+): Promise<any> {
+  const result = await invoke<any>('update_codeium_access', {
+    id: accountId,
+    memberApiKey,
+    disableAccess,
+  })
+  if (result && result.success === false) {
+    throw new Error(extractUpdateAccessErrorMessage(result))
+  }
+  return result
+}
+
 // 保存成员详情（角色和访问权限）
 async function saveMemberDetail() {
   if (!selectedMember.value) return
@@ -773,11 +822,11 @@ async function saveMemberDetail() {
     
     // 更新访问权限（如果有变化）
     if (originalDisabled !== newDisabled) {
-      await invoke<any>('update_codeium_access', {
-        id: props.accountId,
-        memberApiKey: selectedMember.value.api_key,
-        disableAccess: newDisabled
-      })
+      await invokeUpdateCodeiumAccess(
+        props.accountId,
+        selectedMember.value.api_key,
+        newDisabled,
+      )
     }
     
     ElMessage.success('保存成功')
@@ -1296,11 +1345,11 @@ async function executeTransfer() {
     // 找到当前账号的成员信息并禁用访问
     const currentMember = members.value.find(m => m.email?.toLowerCase() === currentAccountEmail.value?.toLowerCase())
     if (currentMember && !currentMember.disable_codeium) {
-      await invoke<any>('update_codeium_access', {
-        id: props.accountId,
-        memberApiKey: currentMember.api_key,
-        disableAccess: true
-      })
+      await invokeUpdateCodeiumAccess(
+        props.accountId,
+        currentMember.api_key,
+        true,
+      )
     }
     
     // 查找目标用户是否已在团队中

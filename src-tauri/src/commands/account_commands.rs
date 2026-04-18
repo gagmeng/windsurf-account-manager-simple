@@ -50,6 +50,17 @@ pub async fn add_account_by_refresh_token(
     group: Option<String>,
     store: State<'_, Arc<DataStore>>,
 ) -> Result<serde_json::Value, String> {
+    // 防御：Devin 一级认证令牌（auth1_ 前缀）不能被当作 Firebase refresh_token 使用
+    // 若用户误把 Devin auth1_token 粘贴到此处，应引导其使用 Devin 账密登录模式
+    let trimmed = refresh_token.trim();
+    if trimmed.starts_with("auth1_") {
+        return Err(
+            "检测到 Devin 一级认证令牌 (auth1_ 前缀)。请使用“Devin 账密”模式添加账号，\
+             而非 Refresh Token 模式。"
+                .to_string(),
+        );
+    }
+
     let auth_service = AuthService::new();
     
     // Step 1: 使用 refresh_token 获取 access_token
@@ -90,8 +101,11 @@ pub async fn add_account_by_refresh_token(
     account.last_login_at = Some(chrono::Utc::now());
     
     // 获取账号详细信息（套餐、积分等）
+    // 这里是 Firebase refresh_token 登录路径，直接构造 Firebase AuthContext；
+    // auth1_token 开头的 Devin token 在前文已被拒绝
     let windsurf_service = WindsurfService::new();
-    if let Ok(user_info_result) = windsurf_service.get_current_user(&token).await {
+    let ctx = crate::services::AuthContext::firebase(token.clone());
+    if let Ok(user_info_result) = windsurf_service.get_current_user(&ctx).await {
         if let Some(user_info) = user_info_result.get("user_info") {
             // 提取用户基本信息（包含api_key）
             if let Some(user) = user_info.get("user") {

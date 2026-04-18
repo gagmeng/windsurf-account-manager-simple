@@ -112,6 +112,104 @@ export interface Account {
   overage_balance_micros?: number;
   // 自定义排序顺序（用于拖拽排序）
   sortOrder?: number;
+
+  // ==================== Devin Session 认证字段 ====================
+  /** Devin 一级认证令牌（可用于再次换取 session_token） */
+  devin_auth1_token?: string;
+  /** Devin 账号 ID（格式：account-<32 字符十六进制>） */
+  devin_account_id?: string;
+  /** Devin 主组织 ID */
+  devin_primary_org_id?: string;
+  /** 认证提供方："firebase"（默认旧体系）或 "devin"（Devin Session 新体系） */
+  auth_provider?: 'firebase' | 'devin';
+}
+
+/**
+ * Devin 组织条目
+ */
+export interface WindsurfOrg {
+  id: string;
+  name: string;
+}
+
+/**
+ * add_account_by_devin_login 的响应结构
+ */
+export interface DevinLoginResult {
+  success: boolean;
+  requires_org_selection?: boolean;
+  auth1_token?: string;
+  orgs?: WindsurfOrg[];
+  account?: Account;
+  email?: string;
+  plan_name?: string;
+  used_quota?: number;
+  total_quota?: number;
+  devin_account_id?: string;
+  primary_org_id?: string;
+  message?: string;
+}
+
+/**
+ * CheckUserLoginMethod 的响应（Firebase 侧对邮箱的登录方式判断）
+ *
+ * 对应 `exa.seat_management_pb.SeatManagementService/CheckUserLoginMethod`
+ */
+export interface CheckUserLoginMethodResult {
+  redirect_url: string;
+  disallow_enterprise_user_login: boolean;
+  user_exists: boolean;
+  is_migrated: boolean;
+  has_password: boolean;
+}
+
+/**
+ * 登录流派嗅探推荐值
+ *
+ * - `"firebase"`    — 老 Firebase 账号 + 已设密码，走 Firebase 邮箱密码登录
+ * - `"devin"`       — 已迁移或新 Auth1 账号，走 Devin 账密登录
+ * - `"sso"`         — 挂接企业 SSO，必须在浏览器中完成 SSO 跳转
+ * - `"no_password"` — 老账号仅用过 Google/GitHub，需用 OAuth 或先重置密码
+ * - `"not_found"`   — 邮箱两侧都不存在，需先注册
+ * - `"blocked"`     — 企业用户被限制普通登录
+ */
+export type LoginMethodRecommendation =
+  | 'firebase'
+  | 'devin'
+  | 'sso'
+  | 'no_password'
+  | 'not_found'
+  | 'blocked';
+
+/**
+ * 登录流派嗅探聚合结果
+ *
+ * 由后端 `sniff_login_method` Tauri 命令返回，聚合：
+ * - Firebase 侧 `CheckUserLoginMethod`
+ * - Devin 侧 `/_devin-auth/connections`
+ */
+export interface LoginMethodSniffResult {
+  /** 建议的登录流派 */
+  recommended: LoginMethodRecommendation;
+  /** 面向人的理由说明，可直接展给 UI */
+  reason: string;
+
+  // ==== Firebase(WS) 侧原始判定 ====
+  user_exists: boolean;
+  is_migrated: boolean;
+  has_password: boolean;
+  redirect_url: string | null;
+  disallow_enterprise: boolean;
+
+  // ==== Devin 侧原始判定 ====
+  /** Devin `/connections` 返回的原始 JSON，接口失败或邮箱不存在时为 null */
+  devin_connections: Record<string, any> | null;
+  /** Devin 侧 `method` 字段：`"auth1"` | `"not_found"` | null */
+  devin_method: string | null;
+  /** Devin 侧 `has_password` 字段 */
+  devin_has_password: boolean | null;
+  /** Devin 侧 `sso_connections` 数组是否非空 */
+  has_sso_connection: boolean;
 }
 
 // ============================================================
@@ -325,6 +423,7 @@ export interface Settings {
   useLocalSuccessBins?: boolean;  // 使用本地成功BIN池
   testModeLastBin?: string | null;  // 测试模式下上次使用的BIN（用于顺序遍历）
   seamlessSwitchEnabled?: boolean;  // 是否启用无感换号
+  windsurfClientType?: 'windsurf' | 'windsurf-next';  // 客户端类型
   windsurfPath?: string | null;  // Windsurf安装路径
   patchBackupPath?: string | null;  // 补丁备份文件路径
   autoOpenBrowser?: boolean;  // 是否自动打开浏览器
@@ -334,8 +433,9 @@ export interface Settings {
   proxyEnabled?: boolean;  // 是否启用代理
   proxyUrl?: string | null;  // 代理地址 (如 http://127.0.0.1:7890)
   useLightweightApi?: boolean;  // 使用轻量级API(GetPlanStatus)获取配额信息
-  subscriptionPlan?: number;  // 订阅计划: 1=Teams, 2=Pro
+  subscriptionPlan?: number;  // 订阅计划: 0=Free, 1=Teams, 2=Pro, 3=Enterprise SaaS, 4=Hybrid, 5=Enterprise Self-Hosted, 6=Waitlist Pro, 7=Teams Ultimate, 8=Pro Ultimate, 9=Trial, 10=Enterprise Self-Serve, 11=Enterprise SaaS Pooled, 12=Devin Enterprise, 14=Devin Teams, 15=Devin Teams V2, 16=Devin Pro, 17=Devin Max, 18=Max, 19=Devin Free, 20=Devin Trial
   paymentPeriod?: number;  // 支付周期: 1=月付, 2=年付
+  startTrial?: boolean;  // 是否以试用方式开始订阅
   teamName?: string;  // Teams 计划的团队名称
   seatCount?: number;  // Teams 计划的席位数量
 }
