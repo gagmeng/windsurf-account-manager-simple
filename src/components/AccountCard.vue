@@ -237,6 +237,19 @@
           />
         </el-tooltip>
 
+        <!-- 转换登录方式（Firebase ↔ Devin）：按当前 auth_provider 动态切换 tooltip 与动作 -->
+        <el-tooltip :content="convertActionLabel" placement="top">
+          <el-button
+            size="small"
+            :icon="Connection"
+            circle
+            type="warning"
+            plain
+            @click="handleConvertAuthProvider"
+            :loading="isConvertingAuth"
+          />
+        </el-tooltip>
+
         <el-tooltip content="删除用户(Windsurf)" placement="top">
           <el-button
             size="small"
@@ -330,6 +343,18 @@
           />
         </el-tooltip>
 
+        <el-tooltip content="检查Pro试用资格" placement="top">
+          <el-button
+            size="small"
+            :icon="Trophy"
+            circle
+            type="info"
+            plain
+            @click="handleCheckProTrial"
+            :loading="isCheckingProTrial"
+          />
+        </el-tooltip>
+
         <el-tooltip content="一键切号" placement="top">
           <el-button
             size="small"
@@ -339,19 +364,6 @@
             plain
             @click="handleSwitchAccount"
             :loading="isSwitching"
-          />
-        </el-tooltip>
-
-        <!-- 转换登录方式（Firebase ↔ Devin）：按当前 auth_provider 动态切换 tooltip 与动作 -->
-        <el-tooltip :content="convertActionLabel" placement="top">
-          <el-button
-            size="small"
-            :icon="Connection"
-            circle
-            type="warning"
-            plain
-            @click="handleConvertAuthProvider"
-            :loading="isConvertingAuth"
           />
         </el-tooltip>
       </div>
@@ -681,6 +693,7 @@ const isGettingBilling = ref(false);
 const isLoadingCreditHistory = ref(false);
 const isRefreshing = ref(false);
 const isGettingTrialLink = ref(false);
+const isCheckingProTrial = ref(false);
 const deletingUser = ref(false);
 const isSwitching = ref(false);
 
@@ -1775,6 +1788,97 @@ async function handleTurnstileSuccess(turnstileToken: string) {
     ElMessage.error(`获取支付链接失败: ${error}`);
   } finally {
     isGettingTrialLink.value = false;
+  }
+}
+
+// 检查Pro试用资格
+//
+// 注意：Windsurf 后端对过期但 JWT 结构合法的 Firebase ID Token 仍可能返回 200 + 合格响应
+// （疑似仅解 payload 取 uid 未校验 exp/签名）。因此调用前必须通过 get_account_valid_token
+// 强制刷新 token，确保传给后端的始终是有效 token；refresh 失败则直接报错，不再使用本地
+// 可能过期的 account.token，避免误报"有试用资格"。
+async function handleCheckProTrial() {
+  if (!props.account.token) {
+    ElMessage.warning('账号未登录，请先刷新Token');
+    return;
+  }
+
+  isCheckingProTrial.value = true;
+  try {
+    // Step 1: 强制拿到经过 ensure_valid_token 刷新后的有效 token
+    const tokenResult = await invoke('get_account_valid_token', { id: props.account.id }) as any;
+    if (!tokenResult?.success || !tokenResult?.token) {
+      ElMessage.error('Token 已失效且无法刷新，请重新登录账号后再试');
+      return;
+    }
+
+    // Step 2: 用新 token 请求后端
+    const result = await invoke('check_pro_trial_eligibility', {
+      authToken: tokenResult.token
+    }) as any;
+
+    if (result.success) {
+      if (result.is_eligible) {
+        // 添加试用资格标签
+        const tagName = '试用资格';
+        const tagColor = '#E6A23C';
+
+        // 检查是否已有该标签
+        const hasTag = props.account.tags.includes(tagName);
+
+        if (!hasTag) {
+          await invoke('batch_update_account_tags', {
+            accountIds: [props.account.id],
+            addTags: [tagName],
+            removeTags: []
+          });
+
+          // 确保全局标签存在
+          try {
+            await invoke('add_tag', { name: tagName, color: tagColor });
+          } catch {
+            // 标签可能已存在
+          }
+
+          // 更新账号信息触发刷新
+          const updatedAccount = { ...props.account, tags: [...props.account.tags, tagName] };
+          emit('update', updatedAccount);
+          ElMessage.success(result.message || '您有资格免费试用Pro！已添加标签');
+        } else {
+          ElMessage.success(result.message || '您有资格免费试用Pro！（标签已存在）');
+        }
+      } else {
+        // 后端确认无资格：若账号上残留历史"试用资格"标签，主动清理保持数据一致
+        const tagName = '试用资格';
+        if (props.account.tags.includes(tagName)) {
+          try {
+            await invoke('batch_update_account_tags', {
+              accountIds: [props.account.id],
+              addTags: [],
+              removeTags: [tagName],
+            });
+            const updatedAccount = {
+              ...props.account,
+              tags: props.account.tags.filter((t) => t !== tagName),
+            };
+            emit('update', updatedAccount);
+            ElMessage.info(`${result.message || '您暂无Pro试用资格'}，已移除"${tagName}"标签`);
+          } catch (e) {
+            console.error('[handleCheckProTrial] 移除标签失败:', e);
+            ElMessage.warning(`${result.message || '您暂无Pro试用资格'}，但移除历史标签失败: ${e}`);
+          }
+        } else {
+          ElMessage.info(result.message || '您暂无Pro试用资格');
+        }
+      }
+    } else {
+      ElMessage.error(`检查失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[handleCheckProTrial] Exception:', error);
+    ElMessage.error(`检查失败: ${error}`);
+  } finally {
+    isCheckingProTrial.value = false;
   }
 }
 

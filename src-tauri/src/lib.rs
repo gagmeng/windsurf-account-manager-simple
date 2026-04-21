@@ -102,6 +102,22 @@ pub fn run() {
             commands::upsert_team_organizational_controls,
             commands::get_available_mcp_plugins,
             commands::delete_windsurf_user,
+            // Pro 试用资格检查
+            commands::check_pro_trial_eligibility,
+            commands::get_account_valid_token,
+            // 用户API密钥管理
+            commands::get_api_key_summary,
+            commands::delete_api_key,
+            commands::register_user_api_key,
+            // 第三方API Provider Key管理
+            commands::get_set_user_api_provider_keys,
+            commands::set_user_api_provider_key,
+            commands::delete_user_api_provider_key,
+            // 迁移 / 开发者主密钥 / 排行榜
+            commands::migrate_api_key,
+            commands::get_primary_api_key_for_devs,
+            commands::get_global_leaderboard_api_key,
+            commands::get_leaderboard,
             
             // 支付相关命令
             commands::generate_virtual_card,

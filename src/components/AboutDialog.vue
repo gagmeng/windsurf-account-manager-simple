@@ -61,7 +61,7 @@
             </el-icon>
           </div>
           <div class="card-info">
-            <span class="card-label">Windsurf 版本</span>
+            <span class="card-label">{{ (clientDisplayName || 'Windsurf') + ' 版本' }}</span>
             <span class="card-value">{{ windsurfVersion || '未检测到' }}</span>
           </div>
         </div>
@@ -73,7 +73,10 @@
             </el-icon>
           </div>
           <div class="card-info">
-            <span class="card-label">当前账号</span>
+            <span class="card-label">
+              当前账号
+              <span v-if="clientDisplayName" class="client-hint">{{ clientDisplayName }}</span>
+            </span>
             <span class="card-value">{{ currentEmail || '未登录' }}</span>
           </div>
         </div>
@@ -268,6 +271,8 @@ const props = defineProps<{
   modelValue: boolean;
   currentEmail?: string;
   windsurfVersion?: string;
+  /** 活跃客户端展示名：「Windsurf」 | 「Windsurf - Next」 */
+  clientDisplayName?: string;
 }>();
 
 const emit = defineEmits<{
@@ -545,6 +550,21 @@ function handleClosed() {
   font-size: 12px;
   color: #666;
   font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 活跃客户端小标识：跟在「当前账号」后显示来源客户端名 */
+.client-hint {
+  font-size: 10px;
+  font-weight: 500;
+  color: #667eea;
+  background: rgba(102, 126, 234, 0.1);
+  padding: 1px 6px;
+  border-radius: 8px;
+  line-height: 1.4;
+  border: 1px solid rgba(102, 126, 234, 0.2);
 }
 
 .card-value {

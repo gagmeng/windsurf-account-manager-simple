@@ -396,6 +396,12 @@ export const settingsApi = {
     team_id?: string;
     version?: string;
     is_active: boolean;
+    /** 活跃客户端类型："windsurf" | "windsurf-next" */
+    client_type: string;
+    /** 客户端展示名："Windsurf" | "Windsurf - Next" */
+    client_display_name: string;
+    /** 活跃客户端进程是否正在运行 */
+    is_running: boolean;
   }> {
     return await invoke('get_current_windsurf_info');
   },

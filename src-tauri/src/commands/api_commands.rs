@@ -2095,3 +2095,205 @@ pub async fn delete_windsurf_user(
 
     Ok(result)
 }
+
+/// 检查Pro试用资格
+///
+/// 前端先调 `get_account_valid_token` 确保传入的是经 ensure_valid_token 刷新后的有效 token，
+/// 再以该 token 作为 `auth_token` 入参调本命令。Windsurf 后端对过期但结构合法的 Firebase
+/// ID Token 仍可能误返回 is_eligible=true，因此 Service 层做了严格 protobuf 解析 + Content-Type
+/// 校验以 fail-fast。
+#[tauri::command]
+pub async fn check_pro_trial_eligibility(
+    auth_token: String,
+) -> Result<serde_json::Value, String> {
+    // auth_token 是 Firebase ID Token，构造 Firebase AuthContext
+    let ctx = AuthContext::firebase(auth_token);
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.check_pro_trial_eligibility(&ctx).await.map_err(|e| e.to_string())
+}
+
+/// 获取账号的有效Token（用于批量操作或二次请求）
+///
+/// 内部调 ensure_valid_token 确保 token 未过期，返回 `{ success, token }`。
+/// 若账号 token 过期且无法刷新，返回错误由调用方处理。
+#[tauri::command]
+pub async fn get_account_valid_token(
+    id: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+
+    // 获取账号信息
+    let mut account = store.get_account(uuid)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 确保有有效的Token
+    ensure_valid_token(&store, &mut account, uuid).await?;
+
+    // 使用缓存的或新刷新的Token
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "success": true,
+        "token": ctx.token
+    }))
+}
+
+// ==================== 用户API密钥管理命令 ====================
+
+/// 获取用户API密钥摘要列表
+#[tauri::command]
+pub async fn get_api_key_summary(
+    id: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    ensure_valid_token(&store, &mut account, uuid).await?;
+
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.get_api_key_summary(&ctx).await.map_err(|e| e.to_string())
+}
+
+/// 删除用户API密钥
+///
+/// key_id / api_key 二选一作为 target。
+#[tauri::command]
+pub async fn delete_api_key(
+    id: String,
+    key_id: Option<String>,
+    api_key: Option<String>,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    ensure_valid_token(&store, &mut account, uuid).await?;
+
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.delete_api_key(&ctx, key_id.as_deref(), api_key.as_deref())
+        .await.map_err(|e| e.to_string())
+}
+
+/// 注册用户并生成新的 sk-ws-01 格式 API Key
+///
+/// 需要账号的 Firebase ID Token（`account.token`）。
+#[tauri::command]
+pub async fn register_user_api_key(
+    id: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+
+    let firebase_token = account.token.clone().ok_or("No Firebase token available")?;
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.register_user(&firebase_token).await.map_err(|e| e.to_string())
+}
+
+// ==================== 第三方 API Provider Key 管理 ====================
+
+/// 获取已设置的第三方API Provider列表
+#[tauri::command]
+pub async fn get_set_user_api_provider_keys(
+    id: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    ensure_valid_token(&store, &mut account, uuid).await?;
+
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.get_set_user_api_provider_keys(&ctx).await.map_err(|e| e.to_string())
+}
+
+/// 设置第三方API Provider Key
+#[tauri::command]
+pub async fn set_user_api_provider_key(
+    id: String,
+    provider: String,
+    provider_api_key: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    ensure_valid_token(&store, &mut account, uuid).await?;
+
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+    let windsurf_service = WindsurfService::new();
+    let provider_id = windsurf_service.provider_name_to_id(&provider);
+    windsurf_service.set_user_api_provider_key(&ctx, provider_id, &provider_api_key)
+        .await.map_err(|e| e.to_string())
+}
+
+/// 删除第三方API Provider Key
+#[tauri::command]
+pub async fn delete_user_api_provider_key(
+    id: String,
+    provider: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    ensure_valid_token(&store, &mut account, uuid).await?;
+
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+    let windsurf_service = WindsurfService::new();
+    let provider_id = windsurf_service.provider_name_to_id(&provider);
+    windsurf_service.delete_user_api_provider_key(&ctx, provider_id)
+        .await.map_err(|e| e.to_string())
+}
+
+// ==================== 迁移 / 开发者主密钥 / 排行榜 ====================
+
+/// 迁移API Key到新的会话Token
+#[tauri::command]
+pub async fn migrate_api_key(
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.migrate_api_key(&api_key).await.map_err(|e| e.to_string())
+}
+
+/// 获取开发者主API Key（通过 session_token）
+#[tauri::command]
+pub async fn get_primary_api_key_for_devs(
+    session_token: String,
+) -> Result<serde_json::Value, String> {
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.get_primary_api_key_for_devs(&session_token).await.map_err(|e| e.to_string())
+}
+
+/// 获取全球排行榜API Key
+///
+/// 传入账号 id 时：强制 ensure_valid_token 刷新后把 token 作为 X-Auth-Token 请求头；
+/// 不传时：匿名请求（部分 Windsurf 端点允许）。
+#[tauri::command]
+pub async fn get_global_leaderboard_api_key(
+    id: Option<String>,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let auth_token = if let Some(account_id) = id {
+        let uuid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+        let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+        ensure_valid_token(&store, &mut account, uuid).await?;
+        account.token
+    } else {
+        None
+    };
+
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.get_global_leaderboard_api_key(auth_token.as_deref()).await.map_err(|e| e.to_string())
+}
+
+/// 获取排行榜数据（ELO 评分、投票数、胜率等）
+#[tauri::command]
+pub async fn get_leaderboard(
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    let windsurf_service = WindsurfService::new();
+    windsurf_service.get_leaderboard(&api_key).await.map_err(|e| e.to_string())
+}

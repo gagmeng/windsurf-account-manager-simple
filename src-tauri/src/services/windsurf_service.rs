@@ -3002,4 +3002,820 @@ impl WindsurfService {
             }))
         }
     }
+
+    /// 检查Pro试用资格 (CheckProTrialEligibility)
+    /// 请求: auth_token (field 1, string)
+    /// 响应: is_eligible (field 1, bool)
+    ///
+    /// **安全解析策略**：Windsurf 后端对过期但结构合法的 Firebase ID Token 仍可能返回
+    /// HTTP 200 + 业务响应（疑似仅解 JWT payload 取 uid 而未校验签名/exp），导致"失效 token
+    /// 被判合格"的误报。本实现通过以下手段 fail-fast：
+    /// 1. Content-Type 必须是 `application/proto` / `application/protobuf`，否则判为异常
+    ///    （Connect 协议错误响应通常以 `application/json` 返回）
+    /// 2. body 必须是合法的 protobuf 消息且 field 1 是 varint（wire_type=0），只有在严格
+    ///    读到 `tag=0x08, value=0x01` 时才判 `is_eligible = true`
+    /// 3. 其它非预期响应形态一律 `success=false` 并回传 body 前若干字节 hex 便于定位
+    pub async fn check_pro_trial_eligibility(&self, ctx: &AuthContext) -> AppResult<serde_json::Value> {
+        let auth_token = ctx.token_str();
+        let url = "https://web-backend.windsurf.com/exa.seat_management_pb.SeatManagementService/CheckProTrialEligibility";
+
+        // 构建请求体: field 1 = auth_token (string)
+        let token_bytes = auth_token.as_bytes();
+        let token_len = token_bytes.len();
+
+        let mut body: Vec<u8> = Vec::new();
+        body.push(0x0a); // field 1, wire type 2 (length-delimited)
+
+        // 编码长度 (varint)
+        if token_len < 128 {
+            body.push(token_len as u8);
+        } else {
+            body.push(((token_len & 0x7F) | 0x80) as u8);
+            body.push((token_len >> 7) as u8);
+        }
+        body.extend_from_slice(token_bytes);
+
+        let response = self.client
+            .post(url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        // 非 200：直接当失败
+        if status_code != 200 {
+            let error_text = String::from_utf8_lossy(&body_bytes).to_string();
+            return Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": "检查试用资格失败",
+                "error_details": error_text,
+            }));
+        }
+
+        // Content-Type 校验：只接受 proto；其它（如 Connect 的 application/json 错误包装）判异常
+        let is_proto_ct = content_type.starts_with("application/proto")
+            || content_type.starts_with("application/protobuf")
+            || content_type.starts_with("application/x-protobuf")
+            || content_type.is_empty(); // 某些代理可能不带 header，暂放行由 body 解析兜底
+        if !is_proto_ct {
+            return Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": "响应 Content-Type 非 protobuf，疑似 token 失效或后端异常",
+                "content_type": content_type,
+                "error_details": String::from_utf8_lossy(&body_bytes).to_string(),
+            }));
+        }
+
+        // body 解析：严格按 protobuf wire format 扫描 field 1 的 bool 值
+        match parse_is_eligible_strict(&body_bytes) {
+            Ok(is_eligible) => Ok(serde_json::json!({
+                "success": true,
+                "is_eligible": is_eligible,
+                "message": if is_eligible { "您有资格免费试用Pro" } else { "您暂无Pro试用资格" },
+            })),
+            Err(reason) => {
+                // 响应形态异常：不报"合格"，fail-fast
+                let hex_preview: String = body_bytes
+                    .iter()
+                    .take(32)
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Ok(serde_json::json!({
+                    "success": false,
+                    "status_code": status_code,
+                    "error": format!("响应格式异常: {}", reason),
+                    "body_len": body_bytes.len(),
+                    "body_hex_preview": hex_preview,
+                }))
+            }
+        }
+    }
+
+    // ==================== 用户API密钥管理 API ====================
+
+    /// 获取用户API密钥摘要列表 (GetApiKeySummary)
+    pub async fn get_api_key_summary(&self, ctx: &AuthContext) -> AppResult<serde_json::Value> {
+        let token = ctx.token_str();
+        let url = format!("{}/exa.seat_management_pb.SeatManagementService/GetApiKeySummary", WINDSURF_BASE_URL);
+        let body = self.encode_string_field(1, token);
+
+        let response = self.client
+            .post(&url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let parsed = super::proto_parser::ProtobufParser::new(body_bytes.to_vec())
+                .parse_message()
+                .unwrap_or_else(|_| serde_json::json!({}));
+
+            // 解析 api_keys：可能是数组或单个对象
+            let field1 = parsed.get("1").or_else(|| parsed.get("subMesssage_1"));
+            let api_keys = if let Some(field) = field1 {
+                if let Some(arr) = field.as_array() {
+                    arr.iter().map(|item| {
+                        let key_id = item.get("1").or_else(|| item.get("string_1")).and_then(|v| v.as_str()).unwrap_or("");
+                        let key_for_display = item.get("2").or_else(|| item.get("string_2")).and_then(|v| v.as_str()).unwrap_or("");
+                        let created_at = item.get("3").or_else(|| item.get("subMesssage_3")).and_then(|v| {
+                            v.get("1").or_else(|| v.get("int_1")).and_then(|s| s.as_i64())
+                        }).unwrap_or(0);
+                        let last_used_at = item.get("4").or_else(|| item.get("subMesssage_4")).and_then(|v| {
+                            v.get("1").or_else(|| v.get("int_1")).and_then(|s| s.as_i64())
+                        }).unwrap_or(0);
+                        serde_json::json!({
+                            "key_id": key_id,
+                            "key_for_display": key_for_display,
+                            "created_at": created_at,
+                            "last_used_at": last_used_at
+                        })
+                    }).collect::<Vec<_>>()
+                } else if field.is_object() {
+                    let key_id = field.get("1").or_else(|| field.get("string_1")).and_then(|v| v.as_str()).unwrap_or("");
+                    let key_for_display = field.get("2").or_else(|| field.get("string_2")).and_then(|v| v.as_str()).unwrap_or("");
+                    let created_at = field.get("3").or_else(|| field.get("subMesssage_3")).and_then(|v| {
+                        v.get("1").or_else(|| v.get("int_1")).and_then(|s| s.as_i64())
+                    }).unwrap_or(0);
+                    let last_used_at = field.get("4").or_else(|| field.get("subMesssage_4")).and_then(|v| {
+                        v.get("1").or_else(|| v.get("int_1")).and_then(|s| s.as_i64())
+                    }).unwrap_or(0);
+                    vec![serde_json::json!({
+                        "key_id": key_id,
+                        "key_for_display": key_for_display,
+                        "created_at": created_at,
+                        "last_used_at": last_used_at
+                    })]
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
+            Ok(serde_json::json!({
+                "success": true,
+                "api_keys": api_keys,
+                "raw_data": parsed,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = String::from_utf8_lossy(&body_bytes).to_string();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    /// 注册用户并获取新的API Key (RegisterUser)
+    /// 通过 Firebase ID Token 注册并获取 sk-ws-01 格式的 API Key
+    pub async fn register_user(&self, firebase_id_token: &str) -> AppResult<serde_json::Value> {
+        // RegisterUser 使用 JSON 格式而非 Protobuf
+        let url = "https://register.windsurf.com/exa.seat_management_pb.SeatManagementService/RegisterUser";
+
+        let request_body = serde_json::json!({
+            "firebase_id_token": firebase_id_token
+        });
+
+        let response = self.client
+            .post(url)
+            .json(&request_body)
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_text = response.text().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let json_result: Result<serde_json::Value, _> = serde_json::from_str(&body_text);
+            match json_result {
+                Ok(data) => {
+                    let api_key = data.get("api_key").or_else(|| data.get("apiKey"))
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let api_server_url = data.get("api_server_url").or_else(|| data.get("apiServerUrl"))
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    Ok(serde_json::json!({
+                        "success": true,
+                        "api_key": api_key,
+                        "name": name,
+                        "api_server_url": api_server_url,
+                        "raw_data": data,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    }))
+                }
+                Err(_) => Ok(serde_json::json!({
+                    "success": false,
+                    "error": "无法解析响应",
+                    "raw_response": body_text,
+                })),
+            }
+        } else {
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": body_text,
+            }))
+        }
+    }
+
+    /// 删除用户API密钥 (DeleteApiKey)
+    ///
+    /// target 可以是：key_id (field 2)、api_key (field 4) 或 group_id (field 5)
+    pub async fn delete_api_key(&self, ctx: &AuthContext, key_id: Option<&str>, api_key: Option<&str>) -> AppResult<serde_json::Value> {
+        let token = ctx.token_str();
+        let url = format!("{}/exa.seat_management_pb.SeatManagementService/DeleteApiKey", WINDSURF_BASE_URL);
+
+        let mut body = self.encode_string_field(1, token);
+        if let Some(kid) = key_id {
+            body.extend(self.encode_string_field(2, kid));
+        } else if let Some(ak) = api_key {
+            body.extend(self.encode_string_field(4, ak));
+        }
+
+        let response = self.client
+            .post(&url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let parsed = super::proto_parser::ProtobufParser::new(body_bytes.to_vec())
+                .parse_message()
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let num_deleted = parsed.get("1").or_else(|| parsed.get("int_1"))
+                .and_then(|v| v.as_i64()).unwrap_or(0);
+            Ok(serde_json::json!({
+                "success": true,
+                "num_deleted": num_deleted,
+                "message": format!("已删除 {} 个密钥", num_deleted),
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = String::from_utf8_lossy(&body_bytes).to_string();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    // ==================== 第三方 API Provider Key 管理 ====================
+
+    /// 获取已设置的第三方API Provider列表 (GetSetUserApiProviderKeys)
+    pub async fn get_set_user_api_provider_keys(&self, ctx: &AuthContext) -> AppResult<serde_json::Value> {
+        let token = ctx.token_str();
+        let url = format!("{}/exa.seat_management_pb.SeatManagementService/GetSetUserApiProviderKeys", WINDSURF_BASE_URL);
+        let body = self.encode_string_field(1, token);
+
+        let response = self.client
+            .post(&url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let parsed = super::proto_parser::ProtobufParser::new(body_bytes.to_vec())
+                .parse_message()
+                .unwrap_or_else(|_| serde_json::json!({}));
+
+            // 解析 providers 数组（field 1，repeated enum）
+            let providers = if let Some(arr) = parsed.get("1").and_then(|v| v.as_array()) {
+                arr.iter().filter_map(|v| v.as_i64()).map(|v| self.provider_id_to_name(v as i32)).collect::<Vec<_>>()
+            } else if let Some(v) = parsed.get("1").and_then(|v| v.as_i64()) {
+                vec![self.provider_id_to_name(v as i32)]
+            } else {
+                vec![]
+            };
+
+            Ok(serde_json::json!({
+                "success": true,
+                "providers": providers,
+                "raw_data": parsed,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = String::from_utf8_lossy(&body_bytes).to_string();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    /// 设置第三方API Provider Key (SetUserApiProviderKey)
+    pub async fn set_user_api_provider_key(&self, ctx: &AuthContext, provider: i32, provider_api_key: &str) -> AppResult<serde_json::Value> {
+        let token = ctx.token_str();
+        let url = format!("{}/exa.seat_management_pb.SeatManagementService/SetUserApiProviderKey", WINDSURF_BASE_URL);
+
+        let mut body = self.encode_string_field(1, token);
+        // field 2: provider (enum as varint)
+        body.push(0x10);
+        body.extend(self.encode_varint(provider as u64));
+        body.extend(self.encode_string_field(3, provider_api_key));
+
+        let response = self.client
+            .post(&url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+
+        if status_code == 200 {
+            Ok(serde_json::json!({
+                "success": true,
+                "message": "API Key已设置",
+                "provider": self.provider_id_to_name(provider),
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = response.bytes().await
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    /// 删除第三方API Provider Key (DeleteUserApiProviderKey)
+    pub async fn delete_user_api_provider_key(&self, ctx: &AuthContext, provider: i32) -> AppResult<serde_json::Value> {
+        let token = ctx.token_str();
+        let url = format!("{}/exa.seat_management_pb.SeatManagementService/DeleteUserApiProviderKey", WINDSURF_BASE_URL);
+
+        let mut body = self.encode_string_field(1, token);
+        body.push(0x10);
+        body.extend(self.encode_varint(provider as u64));
+
+        let response = self.client
+            .post(&url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+
+        if status_code == 200 {
+            Ok(serde_json::json!({
+                "success": true,
+                "message": "API Key已删除",
+                "provider": self.provider_id_to_name(provider),
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = response.bytes().await
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    /// Provider ID → 名称
+    fn provider_id_to_name(&self, id: i32) -> String {
+        match id {
+            0 => "UNSPECIFIED".to_string(),
+            1 => "INTERNAL".to_string(),
+            2 => "OPENAI".to_string(),
+            3 => "GOOGLE_VERTEX".to_string(),
+            4 => "ANTHROPIC".to_string(),
+            5 => "VLLM".to_string(),
+            6 => "TOGETHER_AI".to_string(),
+            7 => "HUGGING_FACE".to_string(),
+            8 => "NOMIC".to_string(),
+            9 => "TEI".to_string(),
+            10 => "OPENAI_COMPATIBLE_EXTERNAL".to_string(),
+            11 => "ANTHROPIC_COMPATIBLE_EXTERNAL".to_string(),
+            12 => "VERTEX_COMPATIBLE_EXTERNAL".to_string(),
+            13 => "BEDROCK_COMPATIBLE_EXTERNAL".to_string(),
+            14 => "AZURE_COMPATIBLE_EXTERNAL".to_string(),
+            15 => "ANTHROPIC_BEDROCK".to_string(),
+            16 => "FIREWORKS".to_string(),
+            17 => "OPEN_ROUTER".to_string(),
+            18 => "XAI".to_string(),
+            20 => "ANTHROPIC_BYOK".to_string(),
+            21 => "CEREBRAS".to_string(),
+            22 => "XAI_BYOK".to_string(),
+            23 => "GEMINI_OPENAI".to_string(),
+            24 => "GOOGLE_GEMINI".to_string(),
+            25 => "GOOGLE_GENAI_VERTEX".to_string(),
+            26 => "ANTHROPIC_VERTEX".to_string(),
+            27 => "DATABRICKS".to_string(),
+            28 => "OPEN_ROUTER_BYOK".to_string(),
+            29 => "ANTHROPIC_DEVIN".to_string(),
+            30 => "FIREWORKS_DEVIN".to_string(),
+            31 => "GROQ".to_string(),
+            32 => "OPENAI_DEVIN".to_string(),
+            33 => "LLAMA_FT_DEEPWIKI".to_string(),
+            _ => format!("UNKNOWN_{}", id),
+        }
+    }
+
+    /// Provider 名称 → ID
+    pub fn provider_name_to_id(&self, name: &str) -> i32 {
+        match name.to_uppercase().as_str() {
+            "OPENAI" => 2,
+            "ANTHROPIC" => 4,
+            "ANTHROPIC_BYOK" => 20,
+            "GOOGLE_GEMINI" => 24,
+            "XAI" | "GROK" => 18,
+            "XAI_BYOK" => 22,
+            "OPEN_ROUTER" => 17,
+            "OPEN_ROUTER_BYOK" => 28,
+            "FIREWORKS" => 16,
+            "GROQ" => 31,
+            "CEREBRAS" => 21,
+            "TOGETHER_AI" => 6,
+            "AZURE_COMPATIBLE_EXTERNAL" | "AZURE" => 14,
+            "OPENAI_COMPATIBLE_EXTERNAL" => 10,
+            "ANTHROPIC_COMPATIBLE_EXTERNAL" => 11,
+            _ => 0,
+        }
+    }
+
+    // ==================== 迁移 / 排行榜 / Devs API Key ====================
+
+    /// 获取开发者主API Key (GetPrimaryApiKeyForDevsOnly)
+    ///
+    /// 通过 session_token 获取主 API Key
+    pub async fn get_primary_api_key_for_devs(&self, session_token: &str) -> AppResult<serde_json::Value> {
+        let url = format!("{}/exa.seat_management_pb.SeatManagementService/GetPrimaryApiKeyForDevsOnly", WINDSURF_BASE_URL);
+        let body = self.encode_string_field(1, session_token);
+
+        let response = self.client
+            .post(&url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let parsed = super::proto_parser::ProtobufParser::new(body_bytes.to_vec())
+                .parse_message()
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let api_key = parsed.get("1")
+                .or_else(|| parsed.get("string_1"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok(serde_json::json!({
+                "success": true,
+                "api_key": api_key,
+                "raw_data": parsed,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = String::from_utf8_lossy(&body_bytes).to_string();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    /// 获取排行榜数据 (GetBigQueryAnalytics with leaderboard_request)
+    pub async fn get_leaderboard(&self, api_key: &str) -> AppResult<serde_json::Value> {
+        let url = "https://web-backend.windsurf.com/exa.user_analytics_pb.UserAnalyticsService/GetBigQueryAnalytics";
+
+        // 构建 BigQueryRequest with leaderboard_request（field 1, empty message）
+        let body: Vec<u8> = vec![0x0a, 0x00];
+
+        let response = self.client
+            .post(url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("X-Api-Key", api_key)
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let parsed = super::proto_parser::ProtobufParser::new(body_bytes.to_vec())
+                .parse_message()
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let model_stats = self.parse_leaderboard_result(&parsed);
+            Ok(serde_json::json!({
+                "success": true,
+                "model_stats": model_stats,
+                "raw_data": parsed,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = String::from_utf8_lossy(&body_bytes).to_string();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    /// 解析排行榜结果
+    ///
+    /// BigQueryResult field 2 = leaderboard_result；leaderboard_result field 1 = model_stats (repeated)
+    fn parse_leaderboard_result(&self, data: &serde_json::Value) -> Vec<serde_json::Value> {
+        let mut results = Vec::new();
+
+        if let Some(leaderboard) = data.get("2").or_else(|| data.get("message_2")) {
+            if let Some(stats_array) = leaderboard.get("1").or_else(|| leaderboard.get("repeated_1")) {
+                if let Some(arr) = stats_array.as_array() {
+                    for stat in arr {
+                        let model = stat.get("1").or_else(|| stat.get("string_1"))
+                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let elo_rating = stat.get("2").or_else(|| stat.get("varint_2"))
+                            .and_then(|v| v.as_i64()).unwrap_or(0);
+                        let votes = stat.get("3").or_else(|| stat.get("varint_3"))
+                            .and_then(|v| v.as_i64()).unwrap_or(0);
+                        let win_rate = stat.get("4").or_else(|| stat.get("double_4"))
+                            .and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let confidence_lower = stat.get("6").or_else(|| stat.get("varint_6"))
+                            .and_then(|v| v.as_i64()).unwrap_or(0);
+                        let confidence_upper = stat.get("7").or_else(|| stat.get("varint_7"))
+                            .and_then(|v| v.as_i64()).unwrap_or(0);
+                        let model_speed = stat.get("8").or_else(|| stat.get("double_8"))
+                            .and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        results.push(serde_json::json!({
+                            "model": model,
+                            "elo_rating": elo_rating,
+                            "votes": votes,
+                            "win_rate": win_rate,
+                            "confidence_lower": confidence_lower,
+                            "confidence_upper": confidence_upper,
+                            "model_speed": model_speed,
+                        }));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// 获取全球排行榜API Key (GetGlobalLeaderboardApiKey)
+    pub async fn get_global_leaderboard_api_key(&self, auth_token: Option<&str>) -> AppResult<serde_json::Value> {
+        let url = "https://web-backend.windsurf.com/exa.user_analytics_pb.UserAnalyticsService/GetGlobalLeaderboardApiKey";
+        let body: Vec<u8> = vec![];
+
+        let mut request = self.client
+            .post(url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("content-length", "0")
+            .header("Referer", "https://windsurf.com/");
+
+        if let Some(token) = auth_token {
+            request = request.header("X-Auth-Token", token);
+        }
+
+        let response = request.send().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let parsed = super::proto_parser::ProtobufParser::new(body_bytes.to_vec())
+                .parse_message()
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let api_key = parsed.get("1")
+                .or_else(|| parsed.get("string_1"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok(serde_json::json!({
+                "success": true,
+                "api_key": api_key,
+                "raw_data": parsed,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = String::from_utf8_lossy(&body_bytes).to_string();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+
+    /// 迁移API Key (MigrateApiKey)
+    ///
+    /// 将旧的 sk-ws-01 API Key 迁移到新的会话 Token
+    pub async fn migrate_api_key(&self, api_key: &str) -> AppResult<serde_json::Value> {
+        let url = format!("{}/exa.seat_management_pb.SeatManagementService/MigrateApiKey", WINDSURF_BASE_URL);
+        let body = self.encode_string_field(1, api_key);
+
+        let response = self.client
+            .post(&url)
+            .body(body)
+            .header("accept", "*/*")
+            .header("connect-protocol-version", "1")
+            .header("content-type", "application/proto")
+            .header("Referer", "https://windsurf.com/")
+            .send()
+            .await
+            .map_err(|e| AppError::Api(e.to_string()))?;
+
+        let status_code = response.status().as_u16();
+        let body_bytes = response.bytes().await.map_err(|e| AppError::Api(e.to_string()))?;
+
+        if status_code == 200 {
+            let parsed = super::proto_parser::ProtobufParser::new(body_bytes.to_vec())
+                .parse_message()
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let session_token = parsed.get("1")
+                .or_else(|| parsed.get("string_1"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok(serde_json::json!({
+                "success": true,
+                "session_token": session_token,
+                "raw_data": parsed,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        } else {
+            let error_body = String::from_utf8_lossy(&body_bytes).to_string();
+            Ok(serde_json::json!({
+                "success": false,
+                "status_code": status_code,
+                "error": error_body,
+            }))
+        }
+    }
+}
+
+// ============================================================================
+// CheckProTrialEligibility 响应严格解析
+// ============================================================================
+
+/// 严格按 protobuf wire format 解析 `CheckProTrialEligibilityResponse`
+///
+/// 只有在 body 是合法的 protobuf 消息、且其中包含 `field 1 (varint) = 0 或 1` 时才返回
+/// 对应的 `bool`。空 body 返回 `Ok(false)`（protobuf 省略默认值）。任何不合法字节都会
+/// 返回 `Err(reason)`，由调用方 fail-fast 处理，避免"随意凑巧以 0x08 0x01 开头"的
+/// 响应（如 Connect 协议错误包装、HTML 错误页等）被误判为"有试用资格"。
+fn parse_is_eligible_strict(body: &[u8]) -> Result<bool, String> {
+    if body.is_empty() {
+        return Ok(false);
+    }
+
+    let mut pos = 0usize;
+    let mut is_eligible: Option<bool> = None;
+
+    while pos < body.len() {
+        let (tag, consumed) = read_varint(&body[pos..])
+            .ok_or_else(|| format!("tag varint 解码失败 @offset={}", pos))?;
+        pos += consumed;
+
+        let field_num = tag >> 3;
+        let wire_type = (tag & 0x07) as u8;
+
+        match wire_type {
+            0 => {
+                // VARINT
+                let (val, c) = read_varint(&body[pos..])
+                    .ok_or_else(|| format!("varint 解码失败 @field={}", field_num))?;
+                pos += c;
+                if field_num == 1 {
+                    // is_eligible 必须是合法 bool
+                    if val > 1 {
+                        return Err(format!("field 1 bool 值非法: {}", val));
+                    }
+                    is_eligible = Some(val != 0);
+                }
+            }
+            1 => {
+                // I64 fixed
+                if pos + 8 > body.len() {
+                    return Err(format!("i64 越界 @field={}", field_num));
+                }
+                pos += 8;
+            }
+            2 => {
+                // LEN-delimited
+                let (len, c) = read_varint(&body[pos..])
+                    .ok_or_else(|| format!("len varint 解码失败 @field={}", field_num))?;
+                pos += c;
+                let len = len as usize;
+                if pos + len > body.len() {
+                    return Err(format!("len-delimited 越界 @field={}", field_num));
+                }
+                pos += len;
+            }
+            5 => {
+                // I32 fixed
+                if pos + 4 > body.len() {
+                    return Err(format!("i32 越界 @field={}", field_num));
+                }
+                pos += 4;
+            }
+            other => {
+                return Err(format!("未知 wire_type={} @field={}", other, field_num));
+            }
+        }
+    }
+
+    if pos != body.len() {
+        return Err(format!("存在未消费字节: pos={}, len={}", pos, body.len()));
+    }
+
+    Ok(is_eligible.unwrap_or(false))
+}
+
+/// protobuf varint 解码，返回 `(value, consumed_bytes)`
+///
+/// 最多 10 字节（u64 最大长度）；遇到超限或截断返回 `None`，由调用方处理错误。
+fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift: u32 = 0;
+    for (i, &byte) in data.iter().enumerate() {
+        if i >= 10 {
+            return None;
+        }
+        result |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((result, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
 }

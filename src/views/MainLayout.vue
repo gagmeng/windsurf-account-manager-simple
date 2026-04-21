@@ -439,6 +439,7 @@
       v-model="showAbout"
       :current-email="currentWindsurfEmail"
       :windsurf-version="windsurfVersion"
+      :client-display-name="windsurfClientDisplayName"
       @open-update-dialog="showUpdateDialog = true"
     />
 
@@ -651,6 +652,7 @@ const currentBillingData = ref<any>(null);
 const billingLoading = ref(false);
 const currentWindsurfEmail = ref<string>('');
 const windsurfVersion = ref<string>('');
+const windsurfClientDisplayName = ref<string>('Windsurf');
 const showBatchUpdatePlanDialog = ref(false);
 const showAbout = ref(false);
 const showUpdateDialog = ref(false);
@@ -2108,7 +2110,8 @@ async function showDeleteGroupConfirm(name: string) {
   }
 }
 
-// 获取当前Windsurf账号信息
+// 获取当前活跃 Windsurf / Windsurf - Next 客户端的账号信息
+// 后端按「进程优先 + state.vscdb mtime fallback」自动选择活跃客户端
 async function fetchCurrentWindsurfInfo() {
   try {
     const info = await settingsApi.getCurrentWindsurfInfo();
@@ -2117,6 +2120,10 @@ async function fetchCurrentWindsurfInfo() {
     }
     if (info.version) {
       windsurfVersion.value = info.version;
+    }
+    // 活跃客户端展示名（驱动关于对话框标题动态切换）
+    if (info.client_display_name) {
+      windsurfClientDisplayName.value = info.client_display_name;
     }
   } catch (error) {
     console.error('获取当前Windsurf信息失败:', error);

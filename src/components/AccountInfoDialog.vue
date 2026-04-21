@@ -13,9 +13,9 @@
     </div>
     
     <div v-else-if="accountInfo" class="dialog-content">
-      <el-tabs class="custom-tabs">
+      <el-tabs class="custom-tabs" v-model="activeInfoTab" @tab-change="onInfoTabChange">
         <!-- 用户详情页面 -->
-        <el-tab-pane label="用户详情">
+        <el-tab-pane label="用户详情" name="user-details">
           <template #label>
             <span class="tab-label"><el-icon><User /></el-icon> 用户详情</span>
           </template>
@@ -480,7 +480,7 @@
         </el-tab-pane>
         
         <!-- 本地信息 -->
-        <el-tab-pane label="本地信息">
+        <el-tab-pane label="本地信息" name="local-info">
           <template #label>
             <span class="tab-label"><el-icon><Monitor /></el-icon> 本地信息</span>
           </template>
@@ -545,7 +545,7 @@
         </el-tab-pane>
         
         <!-- Firebase信息 -->
-        <el-tab-pane label="Firebase" v-if="accountInfo.firebase_info">
+        <el-tab-pane label="Firebase" name="firebase" v-if="accountInfo.firebase_info">
           <template #label>
             <span class="tab-label"><el-icon><Key /></el-icon> Firebase信息</span>
           </template>
@@ -691,6 +691,245 @@
             </el-collapse>
           </div>
         </el-tab-pane>
+
+        <!-- API密钥管理 -->
+        <el-tab-pane label="API密钥" name="api-keys">
+          <template #label>
+            <span class="tab-label"><el-icon><Key /></el-icon> API密钥</span>
+          </template>
+
+          <div class="api-keys-container">
+            <div class="api-keys-header">
+              <div class="header-info">
+                <el-icon :size="28" color="#8b5cf6"><Key /></el-icon>
+                <div>
+                  <h3>API 密钥管理</h3>
+                  <p>管理您的 sk-ws-01 格式 API 密钥，用于 Language Server 认证</p>
+                </div>
+              </div>
+              <div class="header-actions">
+                <el-button type="primary" @click="generateNewApiKey" :loading="generatingApiKey">
+                  <el-icon><Plus /></el-icon> 生成新密钥
+                </el-button>
+                <el-button text type="primary" @click="loadApiKeys" :loading="loadingApiKeys">
+                  <el-icon><Refresh /></el-icon> 刷新
+                </el-button>
+              </div>
+            </div>
+
+            <!-- Devin 账号专属：顶部稳定展示「当前会话 API Key」（不调 API，直接读本地 session_token） -->
+            <div v-if="isDevinAccount && devinSessionApiKey" class="current-api-key-block devin">
+              <div class="current-api-key-header">
+                <el-icon :size="20" color="#10b981"><Key /></el-icon>
+                <span class="current-api-key-title">当前会话 API Key</span>
+                <el-tag type="success" size="small" effect="plain">Devin</el-tag>
+              </div>
+              <p class="current-api-key-desc">
+                Devin 账号使用 <code>devin-session-token$</code> 前缀的 session_token 作为 API Key，可直接复制到 Windsurf IDE 使用。如需刷新 session_token，请在账号卡上使用「刷新 Token」按钮。
+              </p>
+              <div class="current-api-key-display">
+                <code class="current-api-key-code">{{ devinSessionApiKey }}</code>
+                <el-button type="primary" size="small" @click="copyText(devinSessionApiKey)">
+                  <el-icon><CopyDocument /></el-icon> 复制
+                </el-button>
+              </div>
+            </div>
+
+            <div v-if="loadingApiKeys" class="loading-container">
+              <el-icon class="is-loading" size="24"><Loading /></el-icon>
+              <p>正在加载API密钥...</p>
+            </div>
+
+            <div v-else-if="apiKeys.length === 0 && !isDevinAccount" class="empty-container">
+              <el-empty description="暂无API密钥" :image-size="80">
+                <el-button @click="loadApiKeys" type="primary" size="small">重新加载</el-button>
+              </el-empty>
+            </div>
+
+            <div v-else class="api-keys-list">
+              <div class="api-key-item" v-for="key in apiKeys" :key="key.key_id">
+                <div class="key-info">
+                  <div class="key-display">
+                    <code>{{ key.key_for_display || key.key_id }}</code>
+                  </div>
+                  <div class="key-meta">
+                    <span v-if="key.created_at"><el-icon><Clock /></el-icon> 创建: {{ formatTimestampSeconds(key.created_at) }}</span>
+                    <span v-if="key.last_used_at"><el-icon><Timer /></el-icon> 最后使用: {{ formatTimestampSeconds(key.last_used_at) }}</span>
+                  </div>
+                </div>
+                <div class="key-actions">
+                  <el-button type="primary" size="small" @click="copyText(key.key_id)" plain>
+                    <el-icon><CopyDocument /></el-icon> 复制
+                  </el-button>
+                  <el-popconfirm
+                    title="确定要删除此API密钥吗？删除后将无法恢复！"
+                    confirm-button-text="确定删除"
+                    cancel-button-text="取消"
+                    @confirm="deleteApiKey(key.key_id)"
+                  >
+                    <template #reference>
+                      <el-button type="danger" size="small" :loading="deletingKeyId === key.key_id">
+                        <el-icon><Delete /></el-icon> 删除
+                      </el-button>
+                    </template>
+                  </el-popconfirm>
+                </div>
+              </div>
+            </div>
+
+            <div class="api-keys-tip">
+              <el-alert type="warning" :closable="false" show-icon>
+                <template #title>
+                  <strong>注意</strong>
+                </template>
+                删除API密钥后，使用该密钥的所有应用将无法继续访问服务。请谨慎操作。
+              </el-alert>
+            </div>
+
+            <!-- 迁移API Key功能 -->
+            <el-divider content-position="left">迁移 API Key</el-divider>
+            <div class="migrate-api-key-section">
+              <p class="section-desc">将已有的 sk-ws-01 格式 API Key 迁移到新的会话Token</p>
+              <div class="migrate-input-row">
+                <el-input
+                  v-model="migrateApiKeyInput"
+                  placeholder="请输入要迁移的API Key (sk-ws-01-...)"
+                  clearable
+                  style="flex: 1;"
+                />
+                <el-button type="primary" @click="handleMigrateApiKey" :loading="migratingApiKey" :disabled="!migrateApiKeyInput">
+                  迁移
+                </el-button>
+              </div>
+              <div v-if="migrateResult" class="migrate-result">
+                <el-alert v-if="migrateResult.success" type="success" :closable="false" show-icon>
+                  <template #title>迁移成功</template>
+                  <div class="result-content">
+                    <p><strong>Session Token:</strong></p>
+                    <code>{{ migrateResult.session_token }}</code>
+                    <el-button size="small" @click="copyText(migrateResult.session_token)" style="margin-left: 8px;">
+                      <el-icon><CopyDocument /></el-icon> 复制
+                    </el-button>
+                  </div>
+                </el-alert>
+                <el-alert v-else type="error" :closable="false" show-icon>
+                  <template #title>迁移失败</template>
+                  {{ migrateResult.error }}
+                </el-alert>
+              </div>
+            </div>
+
+            <!-- 获取全球排行榜 -->
+            <el-divider content-position="left">模型排行榜</el-divider>
+            <div class="leaderboard-section">
+              <p class="section-desc">查看Windsurf模型评分排行榜（ELO评分系统）</p>
+              <div class="migrate-input-row">
+                <el-checkbox v-model="useCurrentAccountForLeaderboard">使用当前账号认证</el-checkbox>
+                <el-button type="primary" @click="handleGetLeaderboard" :loading="gettingLeaderboard">
+                  查询排行榜
+                </el-button>
+              </div>
+              <div v-if="leaderboardData && leaderboardData.length > 0" class="leaderboard-table">
+                <el-table :data="leaderboardData" stripe border style="width: 100%">
+                  <el-table-column prop="model" label="模型" width="200" />
+                  <el-table-column prop="elo_rating" label="ELO评分" width="100" sortable />
+                  <el-table-column prop="votes" label="投票数" width="100" sortable />
+                  <el-table-column label="胜率" width="100">
+                    <template #default="{ row }">
+                      {{ (row.win_rate * 100).toFixed(1) }}%
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="速度" width="100">
+                    <template #default="{ row }">
+                      {{ row.model_speed.toFixed(2) }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+              <div v-if="leaderboardError" class="migrate-result">
+                <el-alert type="error" :closable="false" show-icon>
+                  <template #title>查询失败</template>
+                  {{ leaderboardError }}
+                </el-alert>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <!-- 第三方API Provider Key管理 -->
+        <el-tab-pane label="Provider Key" name="provider-keys">
+          <template #label>
+            <span class="tab-label"><el-icon><Connection /></el-icon> Provider Key</span>
+          </template>
+
+          <div class="provider-keys-container">
+            <div class="provider-keys-header">
+              <div class="header-info">
+                <el-icon :size="28" color="#10b981"><Connection /></el-icon>
+                <div>
+                  <h3>第三方 API Provider Key</h3>
+                  <p>管理您的第三方 AI 服务商 API 密钥（如 OpenAI、Anthropic 等）</p>
+                </div>
+              </div>
+              <div class="header-actions">
+                <el-button type="primary" @click="showAddProviderKeyDialog = true">
+                  <el-icon><Plus /></el-icon> 添加密钥
+                </el-button>
+                <el-button text type="primary" @click="loadProviderKeys" :loading="loadingProviderKeys">
+                  <el-icon><Refresh /></el-icon> 刷新
+                </el-button>
+              </div>
+            </div>
+
+            <div v-if="loadingProviderKeys" class="loading-container">
+              <el-icon class="is-loading" size="24"><Loading /></el-icon>
+              <p>正在加载Provider Keys...</p>
+            </div>
+
+            <div v-else-if="providerKeys.length === 0" class="empty-container">
+              <el-empty description="暂无已配置的Provider Key" :image-size="80">
+                <el-button @click="showAddProviderKeyDialog = true" type="primary" size="small">添加Provider Key</el-button>
+              </el-empty>
+            </div>
+
+            <div v-else class="provider-keys-list">
+              <div class="provider-key-item" v-for="provider in providerKeys" :key="provider">
+                <div class="provider-info">
+                  <div class="provider-name">
+                    <el-icon><Connection /></el-icon>
+                    <span>{{ provider }}</span>
+                  </div>
+                  <div class="provider-status">
+                    <el-tag type="success" size="small">已配置</el-tag>
+                  </div>
+                </div>
+                <div class="provider-actions">
+                  <el-popconfirm
+                    title="确定要删除此Provider Key吗？"
+                    confirm-button-text="确定删除"
+                    cancel-button-text="取消"
+                    @confirm="deleteProviderKey(provider)"
+                  >
+                    <template #reference>
+                      <el-button type="danger" size="small" :loading="deletingProvider === provider">
+                        <el-icon><Delete /></el-icon> 删除
+                      </el-button>
+                    </template>
+                  </el-popconfirm>
+                </div>
+              </div>
+            </div>
+
+            <div class="provider-keys-tip">
+              <el-alert type="info" :closable="false" show-icon>
+                <template #title>
+                  <strong>支持的Provider</strong>
+                </template>
+                OpenAI、Anthropic、Google Gemini、XAI (Grok)、OpenRouter、Groq、Fireworks、Cerebras、Together AI、Azure等
+              </el-alert>
+            </div>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </div>
     
@@ -711,24 +950,108 @@
       </div>
     </template>
   </el-dialog>
+
+  <!-- 新生成的API密钥显示对话框 -->
+  <el-dialog
+    v-model="showNewApiKeyDialog"
+    title="新API密钥已生成"
+    width="600px"
+    :close-on-click-modal="false"
+  >
+    <el-alert type="success" :closable="false" show-icon style="margin-bottom: 16px;">
+      <template #title>
+        <strong>请立即复制并保存此密钥</strong>
+      </template>
+      此密钥只会显示一次，关闭后将无法再次查看完整密钥。
+    </el-alert>
+
+    <div class="new-api-key-display">
+      <code class="api-key-code">{{ newGeneratedApiKey }}</code>
+      <el-button type="primary" @click="copyText(newGeneratedApiKey)">
+        <el-icon><CopyDocument /></el-icon> 复制密钥
+      </el-button>
+    </div>
+
+    <template #footer>
+      <el-button type="primary" @click="showNewApiKeyDialog = false">我已保存密钥</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 添加Provider Key对话框 -->
+  <el-dialog
+    v-model="showAddProviderKeyDialog"
+    title="添加第三方 Provider Key"
+    width="500px"
+    :close-on-click-modal="false"
+  >
+    <el-form label-position="top">
+      <el-form-item label="选择Provider">
+        <el-select v-model="newProviderName" placeholder="请选择Provider" style="width: 100%;">
+          <el-option label="OpenAI" value="OPENAI" />
+          <el-option label="Anthropic" value="ANTHROPIC" />
+          <el-option label="Anthropic (BYOK)" value="ANTHROPIC_BYOK" />
+          <el-option label="Google Gemini" value="GOOGLE_GEMINI" />
+          <el-option label="XAI (Grok)" value="XAI" />
+          <el-option label="XAI (BYOK)" value="XAI_BYOK" />
+          <el-option label="OpenRouter" value="OPEN_ROUTER" />
+          <el-option label="OpenRouter (BYOK)" value="OPEN_ROUTER_BYOK" />
+          <el-option label="Groq" value="GROQ" />
+          <el-option label="Fireworks" value="FIREWORKS" />
+          <el-option label="Cerebras" value="CEREBRAS" />
+          <el-option label="Together AI" value="TOGETHER_AI" />
+          <el-option label="Azure (OpenAI兼容)" value="AZURE" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="API Key">
+        <el-input
+          v-model="newProviderApiKey"
+          type="password"
+          placeholder="请输入Provider API Key"
+          show-password
+        />
+      </el-form-item>
+    </el-form>
+
+    <template #footer>
+      <el-button @click="showAddProviderKeyDialog = false">取消</el-button>
+      <el-button type="primary" @click="addProviderKey" :loading="addingProviderKey" :disabled="!newProviderName || !newProviderApiKey">
+        添加
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
 import { ElMessage } from 'element-plus';
+import { invoke } from '@tauri-apps/api/core';
 import { 
   Loading, Refresh, Trophy, UserFilled, User, Clock, Key, 
   Check, Close, Link, Postcard, Connection, Coin, Monitor, CopyDocument,
   Avatar, Location, View, Message, Right, Star, Hide,
-  DataAnalysis, Lock, Calendar
+  DataAnalysis, Lock, Calendar, Timer, Delete, Plus
 } from '@element-plus/icons-vue';
 import { useUIStore, useSettingsStore } from '@/store';
+import { useAccountsStore } from '@/store/modules/accounts';
 import { apiService } from '@/api';
 import { maskEmail } from '@/utils/privacy';
 import dayjs from 'dayjs';
 
 const uiStore = useUIStore();
 const settingsStore = useSettingsStore();
+const accountsStore = useAccountsStore();
+
+// 当前正在查看的账号（用于读取 auth_provider / token 等后端未回传的字段）
+const currentAccount = computed(() =>
+  accountsStore.accounts.find((a) => a.id === uiStore.currentViewingAccountId)
+);
+// 是否为 Devin 账号
+const isDevinAccount = computed(() => currentAccount.value?.auth_provider === 'devin');
+// Devin 账号当前的 `devin-session-token$...` 形态 API Key
+// 后端存储的 account.token 本身已带「devin-session-token$」前缀（见 auth_context.rs 注释），前端原样展示即可
+const devinSessionApiKey = computed(() =>
+  isDevinAccount.value ? (currentAccount.value?.token || '') : ''
+);
 
 // 邮箱脱敏处理
 function displayEmail(email: string | undefined | null): string {
@@ -746,6 +1069,51 @@ const error = ref('');
 const userDetails = ref<any>(null);
 const parsedData = ref<any>(null);
 const loadingUserDetails = ref(false);
+
+// API密钥管理相关
+interface ApiKeyItem {
+  key_id: string
+  key_for_display: string
+  created_at: number
+  last_used_at: number
+}
+const apiKeys = ref<ApiKeyItem[]>([]);
+const loadingApiKeys = ref(false);
+const deletingKeyId = ref('');
+const generatingApiKey = ref(false);
+const newGeneratedApiKey = ref('');
+
+// 第三方Provider Key管理相关
+const providerKeys = ref<string[]>([]);
+const loadingProviderKeys = ref(false);
+const deletingProvider = ref('');
+const showAddProviderKeyDialog = ref(false);
+const newProviderName = ref('');
+const newProviderApiKey = ref('');
+const addingProviderKey = ref(false);
+
+// MigrateApiKey相关
+const migrateApiKeyInput = ref('');
+const migratingApiKey = ref(false);
+const migrateResult = ref<any>(null);
+
+// 排行榜相关
+const useCurrentAccountForLeaderboard = ref(false);
+const gettingLeaderboard = ref(false);
+const leaderboardData = ref<any[]>([]);
+const leaderboardError = ref('');
+
+const showNewApiKeyDialog = ref(false);
+const activeInfoTab = ref('user-details');
+
+// 标签页切换时自动加载数据
+function onInfoTabChange(tabName: string) {
+  if (tabName === 'api-keys') {
+    loadApiKeys();
+  } else if (tabName === 'provider-keys') {
+    loadProviderKeys();
+  }
+}
 
 // 监听对话框显示状态
 watch(() => uiStore.showAccountInfoDialog, (show) => {
@@ -765,6 +1133,8 @@ watch(visible, (val) => {
     accountInfo.value = null;
     userDetails.value = null;
     parsedData.value = null;
+    activeInfoTab.value = 'user-details';
+    apiKeys.value = [];
     error.value = '';
   }
 });
@@ -824,6 +1194,231 @@ async function loadUserDetails() {
     ElMessage.error(`获取用户详情失败: ${err.message || err}`);
   } finally {
     loadingUserDetails.value = false;
+  }
+}
+
+// ==================== API 密钥管理 ====================
+
+// 加载API密钥列表
+async function loadApiKeys() {
+  if (!uiStore.currentViewingAccountId) return;
+
+  loadingApiKeys.value = true;
+  try {
+    const result = await invoke<any>('get_api_key_summary', {
+      id: uiStore.currentViewingAccountId
+    });
+    if (result.success) {
+      apiKeys.value = result.api_keys || [];
+    } else {
+      console.error('[loadApiKeys] Error:', result.error);
+      ElMessage.error(`获取API密钥失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[loadApiKeys] Exception:', error);
+    ElMessage.error(`获取API密钥失败: ${error}`);
+  } finally {
+    loadingApiKeys.value = false;
+  }
+}
+
+// 删除API密钥
+async function deleteApiKey(keyId: string) {
+  if (!uiStore.currentViewingAccountId) return;
+
+  deletingKeyId.value = keyId;
+  try {
+    const result = await invoke<any>('delete_api_key', {
+      id: uiStore.currentViewingAccountId,
+      keyId: keyId
+    });
+    if (result.success) {
+      ElMessage.success(result.message || '密钥已删除');
+      await loadApiKeys();
+    } else {
+      ElMessage.error(`删除失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[deleteApiKey] Exception:', error);
+    ElMessage.error(`删除失败: ${error}`);
+  } finally {
+    deletingKeyId.value = '';
+  }
+}
+
+// 生成新的API密钥
+async function generateNewApiKey() {
+  if (!uiStore.currentViewingAccountId) return;
+
+  generatingApiKey.value = true;
+  try {
+    const result = await invoke<any>('register_user_api_key', {
+      id: uiStore.currentViewingAccountId
+    });
+    if (result.success && result.api_key) {
+      newGeneratedApiKey.value = result.api_key;
+      showNewApiKeyDialog.value = true;
+      ElMessage.success('新API密钥已生成');
+      await loadApiKeys();
+    } else {
+      ElMessage.error(`生成失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[generateNewApiKey] Exception:', error);
+    ElMessage.error(`生成失败: ${error}`);
+  } finally {
+    generatingApiKey.value = false;
+  }
+}
+
+// 格式化秒级时间戳
+function formatTimestampSeconds(timestamp: number | undefined | null) {
+  if (!timestamp) return 'N/A';
+  return dayjs(timestamp * 1000).format('YYYY-MM-DD HH:mm:ss');
+}
+
+// ==================== 第三方 Provider Key 管理 ====================
+
+// 加载 Provider Keys 列表
+async function loadProviderKeys() {
+  if (!uiStore.currentViewingAccountId) return;
+
+  loadingProviderKeys.value = true;
+  try {
+    const result = await invoke<any>('get_set_user_api_provider_keys', {
+      id: uiStore.currentViewingAccountId
+    });
+    if (result.success) {
+      providerKeys.value = result.providers || [];
+    } else {
+      console.error('[loadProviderKeys] Error:', result.error);
+      ElMessage.error(`获取Provider Keys失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[loadProviderKeys] Exception:', error);
+    ElMessage.error(`获取Provider Keys失败: ${error}`);
+  } finally {
+    loadingProviderKeys.value = false;
+  }
+}
+
+// 添加 Provider Key
+async function addProviderKey() {
+  if (!uiStore.currentViewingAccountId || !newProviderName.value || !newProviderApiKey.value) return;
+
+  addingProviderKey.value = true;
+  try {
+    const result = await invoke<any>('set_user_api_provider_key', {
+      id: uiStore.currentViewingAccountId,
+      provider: newProviderName.value,
+      providerApiKey: newProviderApiKey.value
+    });
+    if (result.success) {
+      ElMessage.success(`${result.provider} API Key已设置`);
+      showAddProviderKeyDialog.value = false;
+      newProviderName.value = '';
+      newProviderApiKey.value = '';
+      await loadProviderKeys();
+    } else {
+      ElMessage.error(`设置失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[addProviderKey] Exception:', error);
+    ElMessage.error(`设置失败: ${error}`);
+  } finally {
+    addingProviderKey.value = false;
+  }
+}
+
+// 删除 Provider Key
+async function deleteProviderKey(provider: string) {
+  if (!uiStore.currentViewingAccountId) return;
+
+  deletingProvider.value = provider;
+  try {
+    const result = await invoke<any>('delete_user_api_provider_key', {
+      id: uiStore.currentViewingAccountId,
+      provider: provider
+    });
+    if (result.success) {
+      ElMessage.success(`${result.provider} API Key已删除`);
+      await loadProviderKeys();
+    } else {
+      ElMessage.error(`删除失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[deleteProviderKey] Exception:', error);
+    ElMessage.error(`删除失败: ${error}`);
+  } finally {
+    deletingProvider.value = '';
+  }
+}
+
+// ==================== 迁移 API Key / 排行榜 ====================
+
+// 迁移 API Key 到新会话 Token
+async function handleMigrateApiKey() {
+  if (!migrateApiKeyInput.value) return;
+
+  migratingApiKey.value = true;
+  migrateResult.value = null;
+  try {
+    const result = await invoke<any>('migrate_api_key', {
+      apiKey: migrateApiKeyInput.value
+    });
+    migrateResult.value = result;
+    if (result.success) {
+      ElMessage.success('API Key迁移成功');
+    } else {
+      ElMessage.error(`迁移失败: ${result.error || '未知错误'}`);
+    }
+  } catch (error: any) {
+    console.error('[handleMigrateApiKey] Exception:', error);
+    migrateResult.value = { success: false, error: error.toString() };
+    ElMessage.error(`迁移失败: ${error}`);
+  } finally {
+    migratingApiKey.value = false;
+  }
+}
+
+// 获取排行榜数据
+async function handleGetLeaderboard() {
+  gettingLeaderboard.value = true;
+  leaderboardData.value = [];
+  leaderboardError.value = '';
+  try {
+    // 先获取排行榜API Key
+    const accountId = useCurrentAccountForLeaderboard.value ? uiStore.currentViewingAccountId : undefined;
+    const keyResult = await invoke<any>('get_global_leaderboard_api_key', {
+      id: accountId
+    });
+
+    if (!keyResult.success || !keyResult.api_key) {
+      throw new Error(keyResult.error || '获取排行榜API Key失败');
+    }
+
+    // 使用 API Key 查询排行榜
+    const result = await invoke<any>('get_leaderboard', {
+      apiKey: keyResult.api_key
+    });
+
+    if (result.success) {
+      leaderboardData.value = result.model_stats || [];
+      if (leaderboardData.value.length === 0) {
+        ElMessage.info('暂无排行榜数据');
+      } else {
+        ElMessage.success(`获取到 ${leaderboardData.value.length} 个模型的排名数据`);
+      }
+    } else {
+      leaderboardError.value = result.error || '未知错误';
+      ElMessage.error(`查询失败: ${leaderboardError.value}`);
+    }
+  } catch (error: any) {
+    console.error('[handleGetLeaderboard] Exception:', error);
+    leaderboardError.value = error.toString();
+    ElMessage.error(`查询失败: ${error}`);
+  } finally {
+    gettingLeaderboard.value = false;
   }
 }
 
@@ -2756,6 +3351,450 @@ function getPermissionCount(permissions: any): number {
     tr { border-bottom-color: #4c4d4f; }
     .label-cell { color: #a3a6ad; }
     .value-cell { color: #cfd3dc; }
+  }
+}
+
+// API密钥管理样式
+.api-keys-container {
+  padding: 20px;
+
+  .api-keys-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+
+    .header-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+
+      h3 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+        color: #303133;
+      }
+
+      p {
+        margin: 4px 0 0;
+        font-size: 13px;
+        color: #909399;
+      }
+    }
+  }
+
+  .api-keys-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+
+    .api-key-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px;
+      background: #f5f7fa;
+      border-radius: 8px;
+      border: 1px solid #e4e7ed;
+
+      .key-info {
+        flex: 1;
+
+        .key-display {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+
+          code {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            color: #303133;
+            background: #fff;
+            padding: 8px 14px;
+            border-radius: 4px;
+            border: 1px solid #dcdfe6;
+            max-width: 350px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+
+          .copy-btn {
+            cursor: pointer;
+            color: #909399;
+            transition: color 0.2s;
+
+            &:hover {
+              color: #409eff;
+            }
+          }
+        }
+
+        .key-meta {
+          display: flex;
+          gap: 16px;
+          margin-top: 8px;
+          font-size: 12px;
+          color: #909399;
+
+          span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+          }
+        }
+      }
+
+      .key-actions {
+        margin-left: 16px;
+      }
+    }
+  }
+
+  .api-keys-tip {
+    margin-top: 20px;
+  }
+
+  .api-keys-header .header-actions {
+    display: flex;
+    gap: 8px;
+  }
+}
+
+// Devin 账号 API 密钥 tab 顶部稳定展示区块（直接展示当前 session_token）
+.current-api-key-block {
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  border-radius: 10px;
+  border: 1px solid #bbf7d0;
+  background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+
+  &.devin {
+    border-color: #a7f3d0;
+  }
+
+  .current-api-key-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+
+    .current-api-key-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #065f46;
+    }
+  }
+
+  .current-api-key-desc {
+    margin: 0 0 12px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #047857;
+
+    code {
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 12px;
+      color: #065f46;
+      background: rgba(255, 255, 255, 0.6);
+      padding: 1px 6px;
+      border-radius: 3px;
+    }
+  }
+
+  .current-api-key-display {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    .current-api-key-code {
+      flex: 1;
+      font-family: 'Consolas', 'Monaco', 'SF Mono', monospace;
+      font-size: 12px;
+      color: #065f46;
+      background: #fff;
+      padding: 10px 14px;
+      border-radius: 6px;
+      border: 1px solid #a7f3d0;
+      word-break: break-all;
+      max-height: 120px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      box-shadow: 0 1px 2px rgba(5, 95, 70, 0.08);
+    }
+  }
+}
+
+// 新生成的API密钥显示样式
+.new-api-key-display {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+  padding: 20px;
+  background: #f5f7fa;
+  border-radius: 8px;
+
+  .api-key-code {
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 13px;
+    color: #303133;
+    background: #fff;
+    padding: 12px 16px;
+    border-radius: 6px;
+    border: 1px solid #dcdfe6;
+    word-break: break-all;
+    width: 100%;
+    text-align: center;
+  }
+}
+
+// API密钥功能区块通用样式
+.migrate-api-key-section,
+.leaderboard-section {
+  margin-top: 20px;
+  padding: 20px;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+
+  .section-desc {
+    margin: 0 0 16px;
+    font-size: 13px;
+    color: #64748b;
+    line-height: 1.5;
+  }
+
+  .migrate-input-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+
+  .migrate-result {
+    margin-top: 16px;
+
+    .result-content {
+      margin-top: 12px;
+
+      p {
+        margin: 0 0 8px;
+        font-size: 13px;
+        color: #475569;
+      }
+
+      code {
+        font-family: 'Consolas', 'Monaco', 'SF Mono', monospace;
+        font-size: 12px;
+        color: #1e293b;
+        background: #fff;
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        display: inline-block;
+        word-break: break-all;
+        max-width: 100%;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+      }
+    }
+  }
+}
+
+// 排行榜表格样式
+.leaderboard-table {
+  margin-top: 16px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+
+  :deep(.el-table) {
+    --el-table-border-color: #e2e8f0;
+
+    th {
+      background: #f8fafc !important;
+      font-weight: 600;
+      color: #475569;
+    }
+
+    td {
+      color: #334155;
+    }
+  }
+}
+
+// Provider Key管理样式
+.provider-keys-container {
+  padding: 20px;
+
+  .provider-keys-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+
+    .header-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+
+      h3 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+        color: #303133;
+      }
+
+      p {
+        margin: 4px 0 0;
+        font-size: 13px;
+        color: #909399;
+      }
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 8px;
+    }
+  }
+
+  .provider-keys-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 20px;
+
+    .provider-key-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px;
+      background: #fafafa;
+      border: 1px solid #ebeef5;
+      border-radius: 8px;
+
+      .provider-info {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+
+        .provider-name {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-weight: 500;
+          color: #303133;
+        }
+      }
+    }
+  }
+}
+
+// 暗色模式适配 - API密钥 / Provider Key / 排行榜 / 迁移
+.dark {
+  .current-api-key-block {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.10) 0%, rgba(16, 185, 129, 0.04) 100%);
+    border-color: rgba(16, 185, 129, 0.35);
+
+    .current-api-key-header {
+      .current-api-key-title { color: #a7f3d0; }
+    }
+
+    .current-api-key-desc {
+      color: #86efac;
+
+      code {
+        background: rgba(255, 255, 255, 0.08);
+        color: #a7f3d0;
+      }
+    }
+
+    .current-api-key-display {
+      .current-api-key-code {
+        background: #1f2937;
+        border-color: rgba(16, 185, 129, 0.3);
+        color: #a7f3d0;
+      }
+    }
+  }
+
+  .migrate-api-key-section,
+  .leaderboard-section {
+    background: linear-gradient(135deg, #1e1e1f 0%, #252526 100%);
+    border-color: #3c3c3c;
+
+    .section-desc { color: #a3a6ad; }
+
+    .migrate-result {
+      .result-content {
+        p { color: #cfd3dc; }
+        code {
+          background: #2d2d2d;
+          border-color: #4c4d4f;
+          color: #e5eaf3;
+        }
+      }
+    }
+  }
+
+  .leaderboard-table {
+    :deep(.el-table) {
+      --el-table-border-color: #4c4d4f;
+      th { background: #2a2a2b !important; color: #a3a6ad; }
+      td { color: #cfd3dc; }
+    }
+  }
+
+  .provider-keys-container {
+    .provider-keys-header {
+      .header-info {
+        h3 { color: #e5eaf3; }
+        p { color: #a3a6ad; }
+      }
+    }
+
+    .provider-keys-list {
+      .provider-key-item {
+        background: #2a2a2b;
+        border-color: #4c4d4f;
+
+        .provider-info {
+          .provider-name { color: #e5eaf3; }
+        }
+      }
+    }
+  }
+
+  .api-keys-container {
+    .api-keys-header {
+      .header-info {
+        h3 { color: #e5eaf3; }
+        p { color: #a3a6ad; }
+      }
+    }
+
+    .api-keys-list {
+      .api-key-item {
+        background: #2a2a2b;
+        border-color: #4c4d4f;
+
+        .key-info {
+          .key-display {
+            code {
+              color: #e5eaf3;
+              background: #1d1e1f;
+              border-color: #4c4d4f;
+            }
+          }
+
+          .key-meta {
+            color: #a3a6ad;
+          }
+        }
+      }
+    }
   }
 }
 </style>
