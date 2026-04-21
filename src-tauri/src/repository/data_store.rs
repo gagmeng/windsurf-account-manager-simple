@@ -918,6 +918,28 @@ impl DataStore {
                 };
                 accounts.sort_by(|a, b| plan_priority(&b.plan_name).cmp(&plan_priority(&a.plan_name)));
             }
+            // 日配额剩余百分比：Some 靠前（升序小→大），None 靠后；与 TokenExpiresAt 同模式
+            SortField::DailyQuotaRemaining => {
+                accounts.sort_by(|a, b| {
+                    match (&a.daily_quota_remaining_percent, &b.daily_quota_remaining_percent) {
+                        (Some(x), Some(y)) => x.cmp(y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
+            // 周配额剩余百分比：同上
+            SortField::WeeklyQuotaRemaining => {
+                accounts.sort_by(|a, b| {
+                    match (&a.weekly_quota_remaining_percent, &b.weekly_quota_remaining_percent) {
+                        (Some(x), Some(y)) => x.cmp(y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
         }
         
         // 根据排序方向反转

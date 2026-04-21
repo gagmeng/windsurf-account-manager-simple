@@ -1,3 +1,4 @@
+use crate::commands::api_commands::apply_plan_status_to_account;
 use crate::models::{Account, OperationLog, OperationType, OperationStatus};
 use crate::repository::DataStore;
 use crate::services::{AuthService, WindsurfService};
@@ -143,7 +144,18 @@ pub async fn add_account_by_refresh_token(
             account.last_quota_update = Some(chrono::Utc::now());
         }
     }
-    
+
+    // 补拉 GetPlanStatus：回填 billing_strategy + daily/weekly_quota_remaining_percent 等
+    // QUOTA 模式专用字段。GetCurrentUser 只覆盖基础 user/plan/subscription，缺这些字段会让
+    // 账号卡降级到 CREDITS 积分显示。弱依赖：失败静默，不影响建账主流程。
+    if let Ok(plan_result) = windsurf_service.get_plan_status(&ctx).await {
+        if plan_result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if let Some(plan_status) = plan_result.get("plan_status") {
+                apply_plan_status_to_account(plan_status, &mut account);
+            }
+        }
+    }
+
     store.update_account(account.clone())
         .await
         .map_err(|e| e.to_string())?;

@@ -6,9 +6,51 @@ use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 use std::path::PathBuf;
+
+// ==================== 切号进度事件（Tauri Event） ====================
+//
+// 前端 AccountCard.vue 通过 listen("switch-progress", ...) 订阅此事件并驱动进度弹窗。
+// 维护守则：
+// - `percent` 必须单调非递减（除非 phase=error）；前端依赖此假设做动画插值。
+// - `step` 是稳定的枚举键（前端按 key 标记 checklist），文案放在 `label`。
+// - `phase`:
+//     "running" = 正在执行该阶段（前端条纹动画）
+//     "success" = 全流程成功（percent=100，前端 1 秒后自动关闭）
+//     "error"   = 失败（前端保持弹窗、展示 error label + "关闭"按钮）
+// - 任何 early return 都必须先 emit phase=error，否则前端会卡在最后一次 running 状态。
+#[derive(Clone, Serialize)]
+struct SwitchProgressPayload {
+    /// 阶段稳定键（与前端 checklist 顺序一一对应）
+    step: &'static str,
+    /// 人类可读阶段描述（允许带上下文变量）
+    label: String,
+    /// 0 ~ 100；error 时保留当前阶段的百分比，方便前端定位失败节点
+    percent: u8,
+    /// "running" | "success" | "error"
+    phase: &'static str,
+}
+
+/// 封装事件发送；忽略发送错误（窗口已关闭等非致命情况）
+fn emit_switch_progress(
+    app: &AppHandle,
+    step: &'static str,
+    label: impl Into<String>,
+    percent: u8,
+    phase: &'static str,
+) {
+    let payload = SwitchProgressPayload {
+        step,
+        label: label.into(),
+        percent,
+        phase,
+    };
+    if let Err(e) = app.emit("switch-progress", &payload) {
+        warn!("Failed to emit switch-progress event: {:?}", e);
+    }
+}
 
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::{HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS}};
@@ -253,20 +295,31 @@ async fn trigger_windsurf_callback(auth_token: &str, client_type: &str) -> AppRe
 
 
 /// 一键切换账号命令（简化版：使用回调URL登录）
+///
+/// 进度事件：整个流程通过 `emit_switch_progress` 向前端持续上报 `switch-progress` 事件
+/// （见本文件头部的 SwitchProgressPayload 文档）。前端 AccountCard.vue 通过 listen 订阅。
 #[tauri::command]
 pub async fn switch_account(
+    app: AppHandle,
     id: String,
     data_store: State<'_, Arc<DataStore>>,
 ) -> Result<Value, String> {
     info!("Switching account: {}", id);
+    emit_switch_progress(&app, "preparing", "开始切换账号...", 5, "running");
     
-    let account_id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let account_id = Uuid::parse_str(&id).map_err(|e| {
+        emit_switch_progress(&app, "preparing", format!("账号ID无效: {}", e), 5, "error");
+        e.to_string()
+    })?;
     
     // 获取账号信息
     let account = data_store
         .get_account(account_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            emit_switch_progress(&app, "preparing", format!("读取账号失败: {}", e), 5, "error");
+            e.to_string()
+        })?;
     
     // Step 1~2: 根据账号体系分流获取 access_token / auth_token
     //
@@ -276,9 +329,14 @@ pub async fn switch_account(
     let (access_token, expires_in, auth_token) = if account.is_devin_account() {
         use crate::services::{AuthContext, WindsurfService};
         info!("[Devin] Using session-token based one-time auth token flow");
+        emit_switch_progress(&app, "fetch_access", "使用 Devin session token 认证...", 15, "running");
 
-        let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
+        let ctx = AuthContext::from_account(&account).map_err(|e| {
+            emit_switch_progress(&app, "fetch_access", format!("Devin 认证上下文构建失败: {}", e), 15, "error");
+            e.to_string()
+        })?;
         let windsurf = WindsurfService::new();
+        emit_switch_progress(&app, "fetch_auth", "正在获取 one-time auth_token...", 35, "running");
         let auth_token = match windsurf.get_one_time_auth_token(&ctx).await {
             Ok(token) => {
                 info!("[Devin] Successfully obtained one-time auth token");
@@ -286,6 +344,7 @@ pub async fn switch_account(
             }
             Err(e) => {
                 error!("[Devin] Failed to get one-time auth token: {:?}", e);
+                emit_switch_progress(&app, "fetch_auth", format!("获取 auth_token 失败: {}", e), 35, "error");
                 return Ok(json!({
                     "success": false,
                     "error": format!("获取auth_token失败: {}", e)
@@ -303,7 +362,9 @@ pub async fn switch_account(
         (access_token, expires_in, auth_token)
     } else {
         // Firebase 分支：必须有 refresh_token 才能换 Google access_token
+        emit_switch_progress(&app, "fetch_access", "正在准备 access_token...", 15, "running");
         if account.refresh_token.is_none() || account.refresh_token.as_ref().unwrap().is_empty() {
+            emit_switch_progress(&app, "fetch_access", "账号没有 refresh_token，请先登录", 15, "error");
             return Ok(json!({
                 "success": false,
                 "error": "账号没有refresh_token，请先登录"
@@ -327,6 +388,7 @@ pub async fn switch_account(
                     Ok(resp) => resp,
                     Err(e) => {
                         error!("Failed to refresh access token: {:?}", e);
+                        emit_switch_progress(&app, "fetch_access", format!("刷新 access_token 失败: {}", e), 15, "error");
                         return Ok(json!({
                             "success": false,
                             "error": format!("获取access_token失败: {}", e)
@@ -342,6 +404,7 @@ pub async fn switch_account(
                 Ok(resp) => resp,
                 Err(e) => {
                     error!("Failed to refresh access token: {:?}", e);
+                    emit_switch_progress(&app, "fetch_access", format!("刷新 access_token 失败: {}", e), 15, "error");
                     return Ok(json!({
                         "success": false,
                         "error": format!("获取access_token失败: {}", e)
@@ -353,10 +416,12 @@ pub async fn switch_account(
 
         // Step 2: 获取auth_token
         info!("Getting auth token...");
+        emit_switch_progress(&app, "fetch_auth", "正在获取 one-time auth_token...", 35, "running");
         let auth_token = match get_auth_token(&access_token).await {
             Ok(token) => token,
             Err(e) => {
                 error!("Failed to get auth token: {:?}", e);
+                emit_switch_progress(&app, "fetch_auth", format!("获取 auth_token 失败: {}", e), 35, "error");
                 return Ok(json!({
                     "success": false,
                     "error": format!("获取auth_token失败: {}", e)
@@ -376,6 +441,12 @@ pub async fn switch_account(
     // 如果无感换号未启用，尝试自动启用
     if !seamless_patch_active {
         info!("Seamless switch not enabled, attempting auto-enable...");
+        emit_switch_progress(&app, "auto_patch", "尝试自动启用无感换号补丁...", 55, "running");
+    } else {
+        // 已启用时也 emit 一次，让前端 checklist 的该步骤显示为"已启用（跳过）"
+        emit_switch_progress(&app, "auto_patch", "无感换号已启用，跳过补丁应用", 55, "running");
+    }
+    if !seamless_patch_active {
         
         // Step A: 检测或使用已有的客户端路径
         let windsurf_path = settings.windsurf_path.as_ref()
@@ -418,6 +489,7 @@ pub async fn switch_account(
     
     // Step 3: 尝试重置机器ID（可能需要管理员权限）
     info!("Attempting to reset machine ID...");
+    emit_switch_progress(&app, "reset_mid", "重置机器 ID...", 70, "running");
     let reset_result = reset_machine_id_internal(&client_type).await;
     let machine_id_reset = match reset_result {
         Ok(_) => {
@@ -433,8 +505,10 @@ pub async fn switch_account(
     
     // Step 4: 触发客户端回调URL以自动登录
     info!("Triggering {} callback...", client_type);
+    emit_switch_progress(&app, "callback", format!("触发 {} 登录...", client_type), 85, "running");
     if let Err(e) = trigger_windsurf_callback(&auth_token, &client_type).await {
         error!("Failed to trigger callback: {:?}", e);
+        emit_switch_progress(&app, "callback", format!("触发登录失败: {}", e), 85, "error");
         return Ok(json!({
             "success": false,
             "error": format!("触发Windsurf登录失败: {}", e)
@@ -442,6 +516,7 @@ pub async fn switch_account(
     }
     
     // 更新账号的token信息
+    emit_switch_progress(&app, "finalize", "保存账号状态...", 95, "running");
     let expires_at = Utc::now() + chrono::Duration::seconds(expires_in.parse::<i64>().unwrap_or(3600));
     if let Err(e) = data_store.update_account_token(
         account_id,
@@ -473,6 +548,8 @@ pub async fn switch_account(
         format!("已触发{}登录（未重置机器ID，可能需要管理员权限）", client_display)
     };
     
+    emit_switch_progress(&app, "done", "切换完成", 100, "success");
+
     Ok(json!({
         "success": true,
         "message": message,

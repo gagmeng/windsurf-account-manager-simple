@@ -467,17 +467,48 @@
           </el-form-item>
           
           <el-form-item label="补丁状态">
-            <el-tag v-if="patchStatus.installed" type="success">已安装</el-tag>
-            <el-tag v-else-if="patchStatus.error" type="danger">{{ patchStatus.error }}</el-tag>
-            <el-tag v-else type="info">未安装</el-tag>
-            <el-button 
-              v-if="patchStatus.installed" 
-              size="small" 
-              style="margin-left: 10px;"
-              @click="checkPatchStatus"
-            >
-              重新检测
-            </el-button>
+            <div class="patch-status-block">
+              <!-- 汇总 tag + 操作按钮 -->
+              <div class="patch-status-header">
+                <el-tag :type="patchSummary.type">{{ patchSummary.label }}</el-tag>
+                <el-button
+                  v-if="canUpgrade"
+                  type="warning"
+                  size="small"
+                  :loading="patchLoading"
+                  @click="handleUpgradePatch"
+                >
+                  升级补丁
+                </el-button>
+                <el-button
+                  v-if="windsurfPath"
+                  size="small"
+                  @click="checkPatchStatus"
+                >
+                  重新检测
+                </el-button>
+              </div>
+              <!-- 子项 checklist（有路径且无 IO 错误时展示） -->
+              <div
+                v-if="windsurfPath && !patchStatus.error"
+                class="patch-checklist"
+              >
+                <div
+                  v-for="item in patchItems"
+                  :key="item.key"
+                  class="patch-checklist-item"
+                  :class="{ 'is-applied': item.applied }"
+                >
+                  <el-icon v-if="item.applied" class="patch-checklist-icon is-applied">
+                    <Check />
+                  </el-icon>
+                  <el-icon v-else class="patch-checklist-icon">
+                    <Close />
+                  </el-icon>
+                  <span>{{ item.label }}</span>
+                </div>
+              </div>
+            </div>
           </el-form-item>
           
           <el-alert
@@ -639,9 +670,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, onMounted } from 'vue';
+import { ref, reactive, watch, onMounted, computed } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Connection } from '@element-plus/icons-vue';
+import { Connection, Check, Close } from '@element-plus/icons-vue';
 import { useSettingsStore, useUIStore } from '@/store';
 import { invoke } from '@tauri-apps/api/core';
 import { systemApi } from '@/api';
@@ -915,9 +946,61 @@ async function clearSuccessBins() {
 const windsurfPath = ref('');
 const detectingPath = ref(false);
 const patchLoading = ref(false);
+// 补丁状态（字段与后端 check_patch_status 返回一一对应）
+// - installed: 三项子补丁全部应用 = true（由后端汇总）
+// - oauthHandler / timeoutRemoved / promptBypassApplied: 三项子补丁各自是否已应用
+// - currentVersion: 文件里是否含有"当前版本注入代码"的特征字符串，用于区分
+//   当前工具 vs 历史/第三方工具打的补丁（见 CURRENT_VERSION_MARKER）
 const patchStatus = reactive({
   installed: false,
   error: '',
+  oauthHandler: false,
+  timeoutRemoved: false,
+  promptBypassApplied: false,
+  currentVersion: false,
+});
+
+// 补丁三项子内容的结构化数据，驱动 UI checklist 渲染
+// 顺序与后端 apply 分支保持一致（6.1 / 6.2 / 6.3），方便用户对照
+const patchItems = computed(() => [
+  { key: 'oauthHandler', label: 'OAuth 回调处理器', applied: patchStatus.oauthHandler },
+  { key: 'timeoutRemoved', label: '移除 180 秒超时限制', applied: patchStatus.timeoutRemoved },
+  { key: 'promptBypassApplied', label: '跳过切号确认对话框', applied: patchStatus.promptBypassApplied },
+]);
+
+// 已应用的子项数（0 ~ 3），UI 汇总文案用
+const patchAppliedCount = computed(() =>
+  patchItems.value.filter(item => item.applied).length
+);
+
+// 是否显示"升级补丁"按钮：文件里已经是"当前版本注入代码"，但某些子项还没应用。
+// 典型场景：用户之前打过旧版工具生成的 1+2 补丁，新工具版本又加了第 3 条，需一键补齐。
+const canUpgrade = computed(() =>
+  patchStatus.currentVersion &&
+  !patchStatus.installed &&
+  patchAppliedCount.value > 0
+);
+
+// 汇总 tag：根据三项子状态 + current_version 派生四种呈现
+// - error: 后端上报读取/规则错误
+// - 未安装: 0/3
+// - 已安装: 3/3（installed=true）
+// - 可升级: 是当前版本补丁但不完整 → canUpgrade=true
+// - 第三方补丁: 部分应用但无当前版本特征 → 可能是历史版本或其他工具打的
+const patchSummary = computed<{ type: 'success' | 'info' | 'warning' | 'danger'; label: string }>(() => {
+  if (patchStatus.error) {
+    return { type: 'danger', label: patchStatus.error };
+  }
+  if (patchStatus.installed) {
+    return { type: 'success', label: '已安装' };
+  }
+  if (patchAppliedCount.value === 0) {
+    return { type: 'info', label: '未安装' };
+  }
+  if (canUpgrade.value) {
+    return { type: 'warning', label: `可升级 ${patchAppliedCount.value}/3` };
+  }
+  return { type: 'warning', label: `第三方补丁 ${patchAppliedCount.value}/3` };
 });
 
 // 伟哥(寸止)相关
@@ -1035,6 +1118,10 @@ async function handleClientTypeChange() {
   settings.seamlessSwitchEnabled = false;
   patchStatus.installed = false;
   patchStatus.error = '';
+  patchStatus.oauthHandler = false;
+  patchStatus.timeoutRemoved = false;
+  patchStatus.promptBypassApplied = false;
+  patchStatus.currentVersion = false;
   await settingsStore.updateSettings(settings);
   // 自动检测新客户端路径
   await detectWindsurfPath();
@@ -1073,6 +1160,10 @@ async function checkPatchStatus() {
     });
     patchStatus.installed = status.installed;
     patchStatus.error = status.error || '';
+    patchStatus.oauthHandler = !!status.oauth_handler;
+    patchStatus.timeoutRemoved = !!status.timeout_removed;
+    patchStatus.promptBypassApplied = !!status.prompt_bypass_applied;
+    patchStatus.currentVersion = !!status.current_version;
     
     // 同步开关状态与实际补丁状态
     if (status.installed !== settings.seamlessSwitchEnabled) {
@@ -1082,6 +1173,10 @@ async function checkPatchStatus() {
     }
   } catch (error) {
     patchStatus.installed = false;
+    patchStatus.oauthHandler = false;
+    patchStatus.timeoutRemoved = false;
+    patchStatus.promptBypassApplied = false;
+    patchStatus.currentVersion = false;
     patchStatus.error = error as string;
   }
 }
@@ -1190,6 +1285,38 @@ async function handleSeamlessSwitch(value: boolean) {
   } catch (error) {
     ElMessage.error(`${action}失败: ${error}`);
     settings.seamlessSwitchEnabled = !value;
+  } finally {
+    patchLoading.value = false;
+  }
+}
+
+// 升级补丁（仅在 canUpgrade=true 时显示按钮）
+// 本质就是再跑一次 apply：后端 dry-run 发现三条 pattern 还有尚未替换的，
+// 会走 apply 分支对剩余子项做增量替换；已经改写过的 pattern 会自动跳过，
+// 因此不会重复打已完成部分，也不会产生无效备份（原始结构已不匹配的分支 no-op）。
+async function handleUpgradePatch() {
+  if (!windsurfPath.value) return;
+  patchLoading.value = true;
+  try {
+    const result = await invoke<any>('apply_seamless_patch', {
+      windsurfPath: windsurfPath.value
+    });
+    if (result.success) {
+      const mods: string[] = result.modifications || [];
+      if (mods.length > 0) {
+        ElMessage.success(`补丁已升级：${mods.join('、')}`);
+      } else {
+        ElMessage.info(result.message || '补丁已是最新');
+      }
+      await checkPatchStatus();
+      settings.windsurfPath = windsurfPath.value;
+      settings.patchBackupPath = result.backup_file || settings.patchBackupPath;
+      await settingsStore.updateSettings(settings);
+    } else {
+      ElMessage.error(result.message || '升级失败');
+    }
+  } catch (error) {
+    ElMessage.error(`升级失败: ${error}`);
   } finally {
     patchLoading.value = false;
   }
@@ -1316,6 +1443,67 @@ void parseSeatCountOptions;
 }
 
 :root.dark .el-alert--warning .el-alert__description {
+  color: #cfd3dc;
+}
+
+/* ==================== 补丁状态区块 ==================== */
+.patch-status-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.patch-status-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.patch-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  background-color: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+}
+
+.patch-checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #909399;
+}
+
+.patch-checklist-item.is-applied {
+  color: #303133;
+}
+
+.patch-checklist-icon {
+  font-size: 14px;
+  color: #C0C4CC;
+}
+
+.patch-checklist-icon.is-applied {
+  color: #67C23A;
+}
+
+/* 深色模式适配 */
+:root.dark .patch-checklist {
+  background-color: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+:root.dark .patch-checklist-item {
+  color: #7a8394;
+}
+
+:root.dark .patch-checklist-item.is-applied {
   color: #cfd3dc;
 }
 </style>

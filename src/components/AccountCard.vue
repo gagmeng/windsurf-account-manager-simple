@@ -341,6 +341,19 @@
             :loading="isSwitching"
           />
         </el-tooltip>
+
+        <!-- 转换登录方式（Firebase ↔ Devin）：按当前 auth_provider 动态切换 tooltip 与动作 -->
+        <el-tooltip :content="convertActionLabel" placement="top">
+          <el-button
+            size="small"
+            :icon="Connection"
+            circle
+            type="warning"
+            plain
+            @click="handleConvertAuthProvider"
+            :loading="isConvertingAuth"
+          />
+        </el-tooltip>
       </div>
     </div>
   </div>
@@ -397,12 +410,81 @@
     @success="handleTurnstileSuccess"
     @cancel="showTurnstileDialog = false"
   />
+
+  <!-- 切号进度弹窗（独立居中 Dialog） -->
+  <!-- 运行中禁止通过遮罩 / Esc 关闭，强制用户看到全流程；成功/失败时允许关闭 -->
+  <el-dialog
+    v-model="switchProgress.visible"
+    :title="`切换到 ${switchProgress.accountName}`"
+    width="460px"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    :show-close="switchProgress.phase !== 'running'"
+    align-center
+    append-to-body
+    class="switch-progress-dialog"
+    @close="closeSwitchProgress"
+  >
+    <div class="switch-progress-body">
+      <!-- 横向进度条：error → exception(红)，100% 且 success → success(绿)，其它 → 默认 -->
+      <el-progress
+        :percentage="switchProgress.percent"
+        :status="switchProgress.phase === 'error'
+          ? 'exception'
+          : (switchProgress.phase === 'success' ? 'success' : undefined)"
+        :stroke-width="12"
+        striped
+        :striped-flow="switchProgress.phase === 'running'"
+      />
+      <!-- 当前阶段描述 -->
+      <div
+        class="switch-progress-label"
+        :class="{ 'is-error': switchProgress.phase === 'error' }"
+      >
+        {{ switchProgress.label || '等待后端开始...' }}
+      </div>
+      <!-- 7 步 checklist -->
+      <div class="switch-progress-steps">
+        <div
+          v-for="(step, idx) in SWITCH_STEP_DEFS"
+          :key="step.key"
+          class="switch-progress-step"
+          :class="`status-${getStepStatus(idx)}`"
+        >
+          <el-icon v-if="getStepStatus(idx) === 'done'" class="step-icon">
+            <CircleCheck />
+          </el-icon>
+          <el-icon v-else-if="getStepStatus(idx) === 'running'" class="step-icon is-spin">
+            <Loading />
+          </el-icon>
+          <el-icon v-else-if="getStepStatus(idx) === 'error'" class="step-icon">
+            <CircleClose />
+          </el-icon>
+          <el-icon v-else class="step-icon">
+            <CircleCheck />
+          </el-icon>
+          <span class="step-label">{{ step.label }}</span>
+        </div>
+      </div>
+    </div>
+    <template #footer>
+      <!-- running 期间不给任何按钮，强制用户等待后端；非 running 显示关闭 -->
+      <el-button
+        v-if="switchProgress.phase !== 'running'"
+        :type="switchProgress.phase === 'error' ? 'danger' : 'primary'"
+        @click="closeSwitchProgress"
+      >
+        关闭
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, reactive, onBeforeUnmount } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   Document,
   RefreshRight,
@@ -423,9 +505,14 @@ import {
   Money,
   Sell,
   Refresh,
+  CircleCheck,
+  CircleClose,
+  Connection,
+  Loading,
 } from '@element-plus/icons-vue';
+import { h } from 'vue';
 import type { Account } from '@/types';
-import { apiService, accountApi } from '@/api';
+import { apiService, accountApi, devinApi } from '@/api';
 import { useAccountsStore, useUIStore, useSettingsStore } from '@/store';
 import UpdateSeatsResultDialog from '@/components/UpdateSeatsResultDialog.vue';
 import CreditHistoryDialog from '@/components/CreditHistoryDialog.vue';
@@ -596,6 +683,92 @@ const isRefreshing = ref(false);
 const isGettingTrialLink = ref(false);
 const deletingUser = ref(false);
 const isSwitching = ref(false);
+
+// ==================== 切号进度弹窗状态 ====================
+// 与后端 switch_account_commands.rs 的 SwitchProgressPayload 对齐
+// phase: 'running' | 'success' | 'error' | 'idle'（idle 仅前端用，代表弹窗未激活）
+type SwitchProgressPhase = 'idle' | 'running' | 'success' | 'error';
+
+interface SwitchProgressEventPayload {
+  step: string;
+  label: string;
+  percent: number;
+  phase: 'running' | 'success' | 'error';
+}
+
+interface SwitchProgressState {
+  visible: boolean;
+  step: string;
+  label: string;
+  percent: number;
+  phase: SwitchProgressPhase;
+  accountName: string;
+}
+
+// 显式泛型声明，避免 TS 在后续赋值 phase='running' 后做 literal narrowing
+// 使得 `switchProgress.phase !== 'error'` 被错判为永远为 true 的比较。
+const switchProgress = reactive<SwitchProgressState>({
+  visible: false,
+  step: '',
+  label: '',
+  percent: 0,
+  phase: 'idle',
+  accountName: '',
+});
+
+// 步骤定义：顺序与后端 emit 的 step key 保持一致
+// 前端按 key 查找当前步骤在序列中的位置来渲染 checklist 状态
+const SWITCH_STEP_DEFS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'preparing', label: '准备账号信息' },
+  { key: 'fetch_access', label: '获取 access_token' },
+  { key: 'fetch_auth', label: '获取 one-time auth_token' },
+  { key: 'auto_patch', label: '检查无感换号补丁' },
+  { key: 'reset_mid', label: '重置机器 ID' },
+  { key: 'callback', label: '触发客户端登录' },
+  { key: 'finalize', label: '保存账号状态' },
+];
+
+// 当前步骤索引（-1 表示尚未开始 / 未命中已知 step）
+const currentStepIndex = computed(() => {
+  if (switchProgress.step === 'done') return SWITCH_STEP_DEFS.length;
+  return SWITCH_STEP_DEFS.findIndex(s => s.key === switchProgress.step);
+});
+
+// 每一步在 UI 上的状态：已完成 ✓ / 当前 spinner / 失败 ✗ / 待办灰
+function getStepStatus(idx: number): 'done' | 'running' | 'error' | 'pending' {
+  const cur = currentStepIndex.value;
+  if (cur === -1) return 'pending';
+  if (idx < cur) return 'done';
+  if (idx === cur) {
+    if (switchProgress.phase === 'error') return 'error';
+    if (switchProgress.phase === 'success') return 'done';
+    return 'running';
+  }
+  return 'pending';
+}
+
+// Tauri 事件监听句柄；每次点击切号时新建，弹窗关闭或卸载时释放
+let switchProgressUnlisten: UnlistenFn | null = null;
+
+// 卸载组件时必须释放 listener，避免"路由切换 → 组件销毁 → 事件继续触发"导致内存泄漏
+onBeforeUnmount(async () => {
+  if (switchProgressUnlisten) {
+    switchProgressUnlisten();
+    switchProgressUnlisten = null;
+  }
+});
+
+// 手动关闭弹窗（仅在非 running 阶段允许）
+function closeSwitchProgress() {
+  if (switchProgress.phase === 'running') return;
+  switchProgress.visible = false;
+  switchProgress.phase = 'idle';
+  if (switchProgressUnlisten) {
+    switchProgressUnlisten();
+    switchProgressUnlisten = null;
+  }
+}
+
 const isResettingCredits = ref(false);
 const isUpdatingPlan = ref(false);
 const billingData = ref<any>(null);
@@ -1086,6 +1259,146 @@ function handleEdit() {
   uiStore.openEditAccountDialog(props.account.id);
 }
 
+// ==================== Firebase ↔ Devin 登录方式互转 ====================
+
+/** 当前账号的转换按钮 tooltip 文案（按 auth_provider 动态） */
+const convertActionLabel = computed(() => {
+  return props.account.auth_provider === 'devin'
+    ? '转换为 Firebase 登录方式'
+    : '转换为 Devin 登录方式';
+});
+
+const isConvertingAuth = ref(false);
+
+/**
+ * 从 orgs 列表弹框让用户选择一个组织，返回选中的 org_id；用户取消返回 null。
+ *
+ * 用于 Firebase→Devin 转换时企端返回多个 org 的二次交互。这里使用轻量的
+ * ElMessageBox + h() 渲染 radio list，避免引入额外 dialog 组件。
+ */
+async function selectOrgInteractively(
+  orgs: Array<{ id: string; name: string }>,
+): Promise<string | null> {
+  if (!orgs.length) return null;
+  if (orgs.length === 1) return orgs[0].id;
+
+  const selected = ref<string>(orgs[0].id);
+  try {
+    await ElMessageBox({
+      title: '选择组织',
+      message: () =>
+        h('div', { style: 'display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto;' },
+          orgs.map((org) =>
+            h(
+              'label',
+              {
+                style: 'display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--el-border-color-light);',
+              },
+              [
+                h('input', {
+                  type: 'radio',
+                  name: 'convert-org',
+                  value: org.id,
+                  checked: selected.value === org.id,
+                  onChange: () => {
+                    selected.value = org.id;
+                  },
+                }),
+                h('div', { style: 'flex: 1; min-width: 0;' }, [
+                  h('div', { style: 'font-weight: 500;' }, org.name || '(未命名组织)'),
+                  h('div', { style: 'font-size: 12px; color: var(--el-text-color-secondary); word-break: break-all;' }, org.id),
+                ]),
+              ],
+            ),
+          ),
+        ),
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      showCancelButton: true,
+      customClass: 'convert-org-select-dialog',
+    });
+  } catch {
+    return null;
+  }
+  return selected.value || null;
+}
+
+/**
+ * 转换当前账号的登录体系（Firebase ↔ Devin）
+ *
+ * 内部按当前 auth_provider 分派：
+ * - Devin 账号 → convert_account_to_firebase
+ * - Firebase 账号 → convert_account_to_devin，多组织时弹选择后再次调用并传 orgId
+ *
+ * 失败时本地账号字段不改（后端已实现原子性）。
+ */
+async function handleConvertAuthProvider() {
+  const isDevin = props.account.auth_provider === 'devin';
+  const targetLabel = isDevin ? 'Firebase' : 'Devin';
+  const sourceLabel = isDevin ? 'Devin' : 'Firebase';
+
+  try {
+    await ElMessageBox.confirm(
+      `即将将账号 ${props.account.nickname || props.account.email} 的登录方式从 【${sourceLabel}】 转换为 【${targetLabel}】。\n\n` +
+        `操作会复用账号已存的明文密码调用 ${targetLabel} 的官方登录接口，成功后自动切换账号字段。\n` +
+        `失败时帐号字段保持不变。\n\n确定继续吗？`,
+      `转换为 ${targetLabel} 登录方式`,
+      {
+        confirmButtonText: `转换为 ${targetLabel}`,
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    );
+  } catch {
+    return;
+  }
+
+  isConvertingAuth.value = true;
+  try {
+    if (isDevin) {
+      const result = await devinApi.convertAccountToFirebase({ id: props.account.id });
+      if (result.success) {
+        ElMessage.success(result.message || '已转换为 Firebase 登录体系');
+        await accountsStore.loadAccounts();
+      } else if (result.already_converted) {
+        ElMessage.info(result.message || '账号已是 Firebase 体系');
+      } else {
+        ElMessage.warning(result.message || '转换未完成');
+      }
+      return;
+    }
+
+    // Firebase → Devin：首次调用不传 orgId
+    let result = await devinApi.convertAccountToDevin({ id: props.account.id });
+
+    // 多组织分支：弹选择后再次调用并传 orgId
+    if (result.requires_org_selection && result.orgs && result.orgs.length > 0) {
+      const chosenOrgId = await selectOrgInteractively(result.orgs);
+      if (!chosenOrgId) {
+        ElMessage.info('已取消多组织选择');
+        return;
+      }
+      result = await devinApi.convertAccountToDevin({
+        id: props.account.id,
+        orgId: chosenOrgId,
+      });
+    }
+
+    if (result.success) {
+      ElMessage.success(result.message || '已转换为 Devin 登录体系');
+      await accountsStore.loadAccounts();
+    } else if (result.already_converted) {
+      ElMessage.info(result.message || '账号已是 Devin 体系');
+    } else {
+      ElMessage.warning(result.message || '转换未完成');
+    }
+  } catch (error: any) {
+    ElMessage.error(`转换登录方式失败：${error?.message || error || '未知错误'}`);
+  } finally {
+    isConvertingAuth.value = false;
+  }
+}
+
 function handleAccountInfo() {
   // 直接打开账户信息对话框
   uiStore.openAccountInfoDialog(props.account.id);
@@ -1522,8 +1835,8 @@ async function handleSwitchAccount() {
   const confirmMessage = isSeamless
     ? `确定要无感切换到账号 ${displayName} 吗？\n\n此操作将：\n• 自动登录并重置机器ID\n• 无需重启客户端\n• 保持当前工作状态`
     : `确定要切换到账号 ${displayName} 吗？\n\n此操作将：\n• 自动检测客户端路径并启用无感换号\n• 自动登录并重置机器ID`;
-  
-  isSwitching.value = true;
+
+  // 先处理确认：用户取消直接返回，不触碰进度状态
   try {
     await ElMessageBox.confirm(
       confirmMessage,
@@ -1534,18 +1847,56 @@ async function handleSwitchAccount() {
         type: 'info',
       }
     );
-    
-    // 调用后端API执行切号
+  } catch {
+    return; // 用户取消
+  }
+
+  // 初始化进度弹窗状态（running 态，percent=0 等待后端第一次 emit）
+  switchProgress.visible = true;
+  switchProgress.accountName = displayName;
+  switchProgress.step = '';
+  switchProgress.label = '等待后端开始...';
+  switchProgress.percent = 0;
+  switchProgress.phase = 'running';
+
+  // 注册 Tauri event listener —— 必须在 invoke 之前，否则会错过后端首个 5% "preparing" 事件
+  //
+  // 防御性释放旧 listener：防止上一次切号异常退出时遗留下来的 handler 再次触发。
+  // 注：后端 emit 是全局广播，所有正在监听的 AccountCard 都会收到同一事件；
+  // 但因为我们只在点击切号的瞬间注册、完成后立即注销，正常使用不会出现双监听。
+  if (switchProgressUnlisten) {
+    switchProgressUnlisten();
+    switchProgressUnlisten = null;
+  }
+  switchProgressUnlisten = await listen<SwitchProgressEventPayload>('switch-progress', (e) => {
+    const p = e.payload;
+    switchProgress.step = p.step;
+    switchProgress.label = p.label;
+    switchProgress.percent = p.percent;
+    switchProgress.phase = p.phase;
+  });
+
+  isSwitching.value = true;
+  try {
     const result = await apiService.switchAccount(props.account.id);
-    
+
     if (result.success) {
+      // 兜底同步最终态：若事件晚于 invoke 返回未抵达，手动置为 success
+      // 类型断言绕开 TS 对 Vue reactive 属性的 literal narrowing（赋值后 TS 错认为 phase 永远为 'running'）
+      const currentPhase = switchProgress.phase as SwitchProgressPhase;
+      if (currentPhase !== 'error') {
+        switchProgress.percent = 100;
+        switchProgress.phase = 'success';
+        switchProgress.step = 'done';
+        switchProgress.label = result.message || '切换完成';
+      }
+
       ElMessage.success({
         message: result.message || '已成功切换账号',
         duration: 5000,
         showClose: true
       });
-      
-      // 自动启用了无感换号，同步前端设置状态
+
       if (result.auto_enabled_seamless) {
         await settingsStore.loadSettings();
         ElMessage.info({
@@ -1554,8 +1905,7 @@ async function handleSwitchAccount() {
           showClose: true
         });
       }
-      
-      // 非无感模式下显示额外提示
+
       if (!result.seamless_patch_active) {
         if (result.machine_id_reset === false) {
           ElMessage.warning({
@@ -1572,19 +1922,34 @@ async function handleSwitchAccount() {
           });
         }
       }
-      
-      // 更新账号状态
-      const updatedAccount = { 
-        ...props.account, 
+
+      const updatedAccount = {
+        ...props.account,
         status: 'active' as const,
         last_login_at: dayjs().toISOString()
       };
       emit('update', updatedAccount);
+
+      // 成功后延迟自动关闭进度弹窗，给用户一个可感知的"完成"反馈
+      setTimeout(() => {
+        if (switchProgress.phase === 'success') {
+          closeSwitchProgress();
+        }
+      }, 1200);
     } else {
+      // 业务失败（success=false）：保持弹窗打开、切到 error 态，让用户看到失败点后手动关闭
+      const currentPhase = switchProgress.phase as SwitchProgressPhase;
+      if (currentPhase !== 'error') {
+        switchProgress.phase = 'error';
+        switchProgress.label = result.error || '切换账号失败';
+      }
       ElMessage.error(result.error || '切换账号失败');
     }
   } catch (error) {
+    // invoke 级别异常（很少见），同样反馈到弹窗上
     if (error !== 'cancel') {
+      switchProgress.phase = 'error';
+      switchProgress.label = `切换账号失败: ${error}`;
       ElMessage.error(`切换账号失败: ${error}`);
     }
   } finally {
@@ -2775,5 +3140,109 @@ async function handleSwitchAccount() {
   background: rgba(107, 114, 128, 0.1) !important;
   color: #9ca3af !important;
   border: 1px solid rgba(107, 114, 128, 0.15) !important;
+}
+
+/* ==================== 切号进度弹窗 ==================== */
+.switch-progress-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 0 8px;
+}
+
+.switch-progress-label {
+  font-size: 13px;
+  color: #606266;
+  min-height: 20px;
+  line-height: 1.5;
+}
+
+.switch-progress-label.is-error {
+  color: #F56C6C;
+  font-weight: 500;
+}
+
+.switch-progress-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background-color: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 6px;
+}
+
+.switch-progress-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #C0C4CC;
+  transition: color 0.2s ease;
+}
+
+.switch-progress-step .step-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.switch-progress-step.status-done {
+  color: #67C23A;
+}
+.switch-progress-step.status-done .step-icon {
+  color: #67C23A;
+}
+
+.switch-progress-step.status-running {
+  color: #303133;
+  font-weight: 500;
+}
+.switch-progress-step.status-running .step-icon {
+  color: #409EFF;
+}
+
+.switch-progress-step.status-error {
+  color: #F56C6C;
+  font-weight: 500;
+}
+.switch-progress-step.status-error .step-icon {
+  color: #F56C6C;
+}
+
+.switch-progress-step.status-pending .step-icon {
+  color: #DCDFE6;
+}
+
+/* running 步骤图标的 spinner 动画 */
+.switch-progress-step .step-icon.is-spin {
+  animation: switch-progress-spin 1s linear infinite;
+}
+
+@keyframes switch-progress-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 深色模式适配 */
+:root.dark .switch-progress-label {
+  color: #cfd3dc;
+}
+
+:root.dark .switch-progress-steps {
+  background-color: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+:root.dark .switch-progress-step {
+  color: #7a8394;
+}
+
+:root.dark .switch-progress-step.status-running {
+  color: #e2e8f0;
+}
+
+:root.dark .switch-progress-step.status-pending .step-icon {
+  color: #4b5563;
 }
 </style>

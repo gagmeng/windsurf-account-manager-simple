@@ -85,6 +85,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: --target x86_64-pc-windows-msvc
 
@@ -94,7 +96,9 @@ jobs:
           name: windows-x64
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
           if-no-files-found: ignore
 
   # Windows ARM64 构建
@@ -128,6 +132,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: --target aarch64-pc-windows-msvc
 
@@ -137,7 +143,9 @@ jobs:
           name: windows-arm64
           path: |
             src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi.sig
             src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
           if-no-files-found: ignore
 
   # macOS x64 构建
@@ -171,6 +179,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: --target x86_64-apple-darwin
 
@@ -180,7 +190,8 @@ jobs:
           name: macos-x64
           path: |
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: ignore
 
   # macOS ARM64 构建
@@ -214,6 +225,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: --target aarch64-apple-darwin
 
@@ -223,7 +236,8 @@ jobs:
           name: macos-arm64
           path: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: ignore
 
   # Linux x64 构建
@@ -260,6 +274,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -269,6 +285,7 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: ignore
 
   # Linux ARM64 构建
@@ -321,6 +338,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CC: aarch64-linux-gnu-gcc
           CXX: aarch64-linux-gnu-g++
           PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
@@ -370,21 +389,197 @@ jobs:
       - name: Display structure of downloaded files
         run: ls -R artifacts
 
+      # actions/upload-artifact@v4 默认保留完整源路径，下载后文件位于
+      # artifacts/<arch>/src-tauri/target/<triple>/release/bundle/<fmt>/<file> 深层目录；
+      # 但后续 Disambiguate rename step 和 latest.json 的 collect 函数用的都是直接子目录
+      # pattern（非递归 glob），路径不匹配就会默默跳过，导致 platforms 为空 + macOS 同名
+      # 冲突从未被真实重命名。先把每个 <arch> 目录 flatten 到顶层，后续步骤即可按预期工作。
+      - name: Flatten artifact directory structure
+        run: |
+          set -euo pipefail
+          for dir in artifacts/*/; do
+            # 把所有深层文件移到 $dir 根下（mv -t 是 GNU coreutils 特性，Ubuntu runner 原生支持）
+            find "$dir" -mindepth 2 -type f -exec mv -t "$dir" {} +
+            # 清理 flatten 后遗留的空目录
+            find "$dir" -mindepth 1 -type d -empty -delete
+          done
+          echo "=== after flatten ==="
+          ls -R artifacts
+
+      # macOS 两个 arch 的 .app.tar.gz / .sig 文件名 Tauri 默认不带 arch 后缀，
+      # 上传到同一 Release 时会因同名触发 softprops/action-gh-release 的 422 already_exists
+      # （或并发下的 404 race）。这里统一补上 _x64 / _aarch64 后缀，既解决上传冲突，也让
+      # latest.json 的 URL 自然区分两个 arch。
+      - name: Disambiguate macOS artifacts (add arch suffix)
+        run: |
+          set -euo pipefail
+          rename_if_exists() {
+            local src="$1"
+            local dst="$2"
+            if [ -f "$src" ]; then
+              mv "$src" "$dst"
+              echo "renamed: $src -> $dst"
+            fi
+          }
+          # macOS x64
+          rename_if_exists \
+            "artifacts/macos-x64/windsurf-account-manager.app.tar.gz" \
+            "artifacts/macos-x64/windsurf-account-manager_x64.app.tar.gz"
+          rename_if_exists \
+            "artifacts/macos-x64/windsurf-account-manager.app.tar.gz.sig" \
+            "artifacts/macos-x64/windsurf-account-manager_x64.app.tar.gz.sig"
+          # macOS ARM64
+          rename_if_exists \
+            "artifacts/macos-arm64/windsurf-account-manager.app.tar.gz" \
+            "artifacts/macos-arm64/windsurf-account-manager_aarch64.app.tar.gz"
+          rename_if_exists \
+            "artifacts/macos-arm64/windsurf-account-manager.app.tar.gz.sig" \
+            "artifacts/macos-arm64/windsurf-account-manager_aarch64.app.tar.gz.sig"
+          echo "=== after rename ==="
+          ls -la artifacts/macos-x64/ artifacts/macos-arm64/ || true
+
+      # 从 README.md 提取当前版本的变更说明（"### v<VERSION> (...)" 块到下一个二级/三级标题之前），
+      # 作为 GitHub Release 正文 + latest.json 的 notes 字段。保持"单一真相源"：版本历史手写在 README，CI 自动同步。
+      - name: Extract release notes from README
+        id: extract_notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.get-version.outputs.version }}"
+
+          if [ ! -f README.md ]; then
+            echo "README.md not found, fallback to default notes."
+            echo "Release v$VERSION" > RELEASE_NOTES.md
+          else
+            awk -v ver="### v$VERSION" '
+              # 命中当前版本的三级标题，开始收集
+              index($0, ver) == 1 { flag = 1; next }
+              # 遇到下一个版本（### v...）或下一个二级标题（## ...），结束
+              flag && /^### v[0-9]/ { flag = 0 }
+              flag && /^## /        { flag = 0 }
+              flag { print }
+            ' README.md > RELEASE_NOTES.md
+
+            # 去除首尾空行
+            sed -i -e '/./,$!d' -e ':a;/^\s*$/{$d;N;ba' RELEASE_NOTES.md || true
+
+            if [ ! -s RELEASE_NOTES.md ]; then
+              echo "No section found for v$VERSION in README.md, fallback to default notes."
+              echo "Release v$VERSION" > RELEASE_NOTES.md
+            fi
+          fi
+
+          # 在正文前加一个标题（GitHub Release 正文展示时更友好）
+          {
+            echo "## 🎉 What's New in v$VERSION"
+            echo ""
+            cat RELEASE_NOTES.md
+            echo ""
+            echo "---"
+            echo ""
+            echo "### 📥 Downloads"
+            echo "- **Windows x64**: \`.msi\` / \`.exe\` (NSIS)"
+            echo "- **Windows ARM64**: \`.msi\` / \`.exe\` (NSIS)"
+            echo "- **macOS Intel**: \`.dmg\`"
+            echo "- **macOS Apple Silicon**: \`.dmg\`"
+            echo "- **Linux x64**: \`.deb\` / \`.rpm\` / \`.AppImage\`"
+            echo "- **Linux ARM64**: \`.deb\` / \`.rpm\`"
+            echo ""
+            echo "### 🔄 Auto-Update"
+            echo "Existing installations with auto-update support will be notified automatically via the built-in updater."
+          } > RELEASE_BODY.md
+
+          echo "=== RELEASE_BODY.md ==="
+          cat RELEASE_BODY.md
+
+      # 合并各平台 .sig 签名文件，生成统一的 latest.json 供 tauri-plugin-updater 消费。
+      # endpoint 指向 Releases latest 的 latest.json（见 tauri.conf.json plugins.updater.endpoints）。
+      - name: Generate latest.json for updater
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.get-version.outputs.version }}"
+          TAG="${{ needs.get-version.outputs.tag_name }}"
+          DL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          declare -A SIGS
+          declare -A URLS
+
+          collect() {
+            local key="$1"
+            local pattern="$2"
+            local match
+            match=$(ls $pattern 2>/dev/null | head -n 1 || true)
+            if [ -n "$match" ] && [ -f "$match" ]; then
+              local base
+              base=$(basename "$match" .sig)
+              SIGS[$key]="$(cat "$match")"
+              URLS[$key]="${DL}/${base}"
+              echo "  [$key] -> $base"
+            else
+              echo "  [$key] no sig found (pattern: $pattern)"
+            fi
+          }
+
+          echo "Collecting platform signatures..."
+          # Windows 用 NSIS 的 -setup.exe.sig（Tauri v2 推荐 updater 走 NSIS，
+          # 支持静默升级且不触发 UAC；MSI 的 updater artifact 是 .msi.zip.sig，
+          # upload 阶段未收集，暂不启用）
+          collect "windows-x86_64"  "artifacts/windows-x64/*-setup.exe.sig"
+          collect "windows-aarch64" "artifacts/windows-arm64/*-setup.exe.sig"
+          collect "darwin-x86_64"   "artifacts/macos-x64/*.app.tar.gz.sig"
+          collect "darwin-aarch64"  "artifacts/macos-arm64/*.app.tar.gz.sig"
+          collect "linux-x86_64"    "artifacts/linux-x64/*.AppImage.sig"
+
+          # 组装 platforms JSON
+          PLATFORMS="{}"
+          for key in "${!SIGS[@]}"; do
+            PLATFORMS=$(jq -n \
+              --argjson acc "$PLATFORMS" \
+              --arg k "$key" \
+              --arg sig "${SIGS[$key]}" \
+              --arg url "${URLS[$key]}" \
+              '$acc + {($k): {signature: $sig, url: $url}}')
+          done
+
+          # notes 字段读取 RELEASE_NOTES.md（精简版，不含 Downloads/Auto-Update 尾块），
+          # 将在客户端 UpdateDialog 中通过 marked 渲染为 markdown。
+          NOTES="$(cat RELEASE_NOTES.md)"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$PUB_DATE" \
+            --arg notes "$NOTES" \
+            --argjson platforms "$PLATFORMS" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \
+            > latest.json
+
+          echo "Generated latest.json:"
+          cat latest.json
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           name: Windsurf Account Manager v${{ needs.get-version.outputs.version }}
           tag_name: ${{ needs.get-version.outputs.tag_name }}
-          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          # 自动发布，不留草稿；失败时用 release --edit 手动改
+          draft: false
           prerelease: false
-          generate_release_notes: true
+          # 使用提取好的 body 覆盖默认 notes（不再使用 generate_release_notes 避免追加 commit 流水）
+          body_path: RELEASE_BODY.md
+          generate_release_notes: false
+          fail_on_unmatched_files: false
           files: |
             artifacts/**/*.exe
+            artifacts/**/*.exe.sig
             artifacts/**/*.msi
+            artifacts/**/*.msi.sig
             artifacts/**/*.dmg
-            artifacts/**/*.app
+            artifacts/**/*.app.tar.gz
+            artifacts/**/*.app.tar.gz.sig
             artifacts/**/*.deb
             artifacts/**/*.rpm
             artifacts/**/*.AppImage
+            artifacts/**/*.AppImage.sig
+            latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

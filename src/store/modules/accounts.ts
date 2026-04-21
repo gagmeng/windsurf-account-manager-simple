@@ -158,6 +158,34 @@ export const useAccountsStore = defineStore('accounts', () => {
       });
     }
 
+    // 高级筛选：日配额剩余百分比范围（仅 QUOTA 计费策略账号参与；字段缺失即排除）
+    if (currentFilter.value.dailyQuotaPercentMin !== undefined) {
+      result = result.filter(acc => {
+        const pct = acc.daily_quota_remaining_percent;
+        return pct !== undefined && pct !== null && pct >= currentFilter.value.dailyQuotaPercentMin!;
+      });
+    }
+    if (currentFilter.value.dailyQuotaPercentMax !== undefined) {
+      result = result.filter(acc => {
+        const pct = acc.daily_quota_remaining_percent;
+        return pct !== undefined && pct !== null && pct <= currentFilter.value.dailyQuotaPercentMax!;
+      });
+    }
+
+    // 高级筛选：周配额剩余百分比范围（仅 QUOTA 计费策略账号参与；字段缺失即排除）
+    if (currentFilter.value.weeklyQuotaPercentMin !== undefined) {
+      result = result.filter(acc => {
+        const pct = acc.weekly_quota_remaining_percent;
+        return pct !== undefined && pct !== null && pct >= currentFilter.value.weeklyQuotaPercentMin!;
+      });
+    }
+    if (currentFilter.value.weeklyQuotaPercentMax !== undefined) {
+      result = result.filter(acc => {
+        const pct = acc.weekly_quota_remaining_percent;
+        return pct !== undefined && pct !== null && pct <= currentFilter.value.weeklyQuotaPercentMax!;
+      });
+    }
+
     // 高级筛选：套餐名称
     if (currentFilter.value.planNames && currentFilter.value.planNames.length > 0) {
       result = result.filter(acc => 

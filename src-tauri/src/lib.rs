@@ -16,6 +16,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 自动更新能力（静默检查 + 下载 + 安装）：
+        // - endpoints / pubkey 在 tauri.conf.json 的 plugins.updater 中配置
+        // - 前端通过 @tauri-apps/plugin-updater 触发 check / downloadAndInstall
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // 更新完成后需要调用 process.relaunch() 重启应用以加载新版本
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // 初始化数据存储
             let store = DataStore::new(app.handle())
@@ -219,18 +225,28 @@ pub fn run() {
             commands::add_account_by_devin_with_org,
             commands::refresh_devin_session,
             commands::add_account_by_devin_session_token,
+            commands::add_account_by_devin_auth1_token,
+            // Firebase ↔ Devin 账号互转
+            commands::convert_account_to_devin,
+            commands::convert_account_to_firebase,
 
             // 登录流派智能嗅探（方案 B：自动嗅探 + 统一入口）
             commands::devin_check_user_login_method,
             commands::sniff_login_method,
 
-            // Devin 邮箱注册 / 无密码邮件登录 / 忘记密码
+            // Devin 邮箱注册 / 无密码邮件登录 / 忘记密码（Windsurf 侧 _devin-auth 通道）
             commands::devin_email_start,
             commands::devin_email_complete,
             commands::devin_password_reset_start,
             commands::devin_password_reset_complete,
             commands::add_account_by_devin_register,
             commands::add_account_by_devin_email_login,
+
+            // Devin 原生站点（app.devin.ai）注册通道：独立端口 /api/auth1/*，注册后自动桥接 Windsurf
+            commands::devin_app_check_connections,
+            commands::devin_app_email_start,
+            commands::devin_app_email_complete,
+            commands::add_account_by_devin_native_register,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

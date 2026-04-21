@@ -19,6 +19,17 @@ const DEVIN_AUTH_BASE_URL: &str = "https://windsurf.com/_devin-auth";
 /// WindsurfPostAuth 走主后端
 const WINDSURF_BACKEND_URL: &str = "https://web-backend.windsurf.com";
 
+/// Devin 原生站点（app.devin.ai）的 Auth1 REST 基础 URL
+///
+/// 与 `DEVIN_AUTH_BASE_URL` 的区别：
+/// - `DEVIN_AUTH_BASE_URL` 走 windsurf.com 同源代理，注册出的账号主归属 Windsurf；
+/// - `DEVIN_APP_AUTH_BASE_URL` 走 app.devin.ai 官方后端，注册出的账号主归属 Devin，
+///   响应里会返回 `windsurf-bridge` 连接类型，便于后续用 auth1_token 桥接到 Windsurf。
+///
+/// 端口路径形如 `/connections`、`/email/start`、`/email/complete`，
+/// 请求体字段比 Windsurf 侧更精简（email/start 无 product；email/complete 无 password/name）。
+const DEVIN_APP_AUTH_BASE_URL: &str = "https://app.devin.ai/api/auth1";
+
 // ==================== 请求/响应结构 ====================
 
 #[derive(Debug, Serialize)]
@@ -257,8 +268,10 @@ impl DevinAuthService {
     pub async fn check_connections(&self, email: &str) -> AppResult<ConnectionsResponse> {
         let url = format!("{}/connections", DEVIN_AUTH_BASE_URL);
 
+        // 服务端对 `product` 做字面值校验（只接受 "Devin" 或 "Windsurf"），
+        // 与网页端、`password_reset_start` 保持一致使用首字母大写，避免未来升级后返回 422。
         let body = ConnectionsRequest {
-            product: "windsurf".to_string(),
+            product: "Windsurf".to_string(),
             email: email.to_string(),
         };
 
@@ -616,7 +629,7 @@ impl DevinAuthService {
     ///
     /// - `mode == "signup"`：为新账号创建而发送验证码
     /// - `mode == "login"`：为无密码账号的邮件验证码登录而发送
-    /// - `product`：默认 `Some("windsurf")`（大小写与网页端一致）
+    /// - `product`：默认 `Some("Windsurf")`（大小写与网页端一致，服务端做字面值校验）
     ///
     /// 服务端会将 6 位数字验证码发至目标邮箱，并返回 `email_verification_token`，
     /// 供后续 `email_complete` 回传使用。
@@ -847,16 +860,51 @@ impl DevinAuthService {
     /// 拿到 `PasswordLoginResponse`（即包含 `auth1_token` 的响应）后，
     /// 换取 session_token 并构造 `DevinLoginResult`。
     ///
-    /// 被 `login_with_password` / `register_with_email_code` / `login_with_email_code` 共享，
-    /// 避免 auth1→session_token 的合并逻辑重复实现。
+    /// 被 `login_with_password` / `register_with_email_code` / `login_with_email_code` /
+    /// `register_native_with_email_code` 共享，避免 auth1→session_token 的合并逻辑重复实现。
+    ///
+    /// 针对 "Devin 新建账号 → 立刻调 PostAuth" 的服务端同步竞态做指数退避重试：
+    /// Devin 服务端在 `/email/complete` 返回 auth1_token 后，需要异步把新账号同步到
+    /// Windsurf 后端的 org 关联表；若立刻调用会得到 404 + `no_eligible_organizations` /
+    /// `not_found`。此处针对该特定错误做 1.5s / 3s / 5s 共 3 次退避重试，其他错误
+    /// （验证码错、参数错等）保持 fail-fast。
     async fn post_auth_to_login_result(
         &self,
         login: PasswordLoginResponse,
         org_id: Option<&str>,
     ) -> AppResult<DevinLoginResult> {
-        let post_auth = self
-            .windsurf_post_auth(&login.auth1_token, org_id.unwrap_or(""))
-            .await?;
+        // 仅对"新建账号 org 同步延迟"这类瞬时错误重试
+        const RETRY_DELAYS_MS: &[u64] = &[1500, 3000, 5000];
+
+        let post_auth = {
+            let mut attempt: usize = 0;
+            loop {
+                match self
+                    .windsurf_post_auth(&login.auth1_token, org_id.unwrap_or(""))
+                    .await
+                {
+                    Ok(result) => break result,
+                    Err(err) => {
+                        if attempt < RETRY_DELAYS_MS.len()
+                            && is_post_auth_org_sync_pending(&err)
+                        {
+                            let delay_ms = RETRY_DELAYS_MS[attempt];
+                            println!(
+                                "[WindsurfPostAuth] org 同步尚未就绪，{}ms 后重试（attempt={}/{}）: {}",
+                                delay_ms,
+                                attempt + 1,
+                                RETRY_DELAYS_MS.len(),
+                                err
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+        };
 
         let final_auth1_token = post_auth
             .auth1_token
@@ -913,6 +961,210 @@ impl DevinAuthService {
         }
     }
 
+    // ==================== Devin 原生站点（app.devin.ai）专属方法 ====================
+
+    /// 为 `app.devin.ai` 侧 REST 请求附加通用头
+    ///
+    /// 与 `apply_common_headers` 的区别：`Origin` / `Referer` 均切换为 `https://app.devin.ai`，
+    /// 避免服务端因跨源拒绝或生成错误归属的 JWT。
+    fn apply_devin_app_headers(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        builder
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .header("Origin", "https://app.devin.ai")
+            .header("Referer", "https://app.devin.ai/auth/signup")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+            )
+    }
+
+    /// 查询 Devin 原生侧（app.devin.ai）邮箱可用的连接方式
+    ///
+    /// 端点：`POST https://app.devin.ai/api/auth1/connections`
+    /// 请求体：`{"product":"devin","email":"..."}`（注意：该端口要求 product 小写 `"devin"`）
+    /// 响应结构与 windsurf 侧 `check_connections` 一致，仅 connections 数组中会额外包含
+    /// `{"type":"windsurf-bridge", ...}` 条目，提示该邮箱可跨桥到 Windsurf。
+    pub async fn devin_app_check_connections(
+        &self,
+        email: &str,
+    ) -> AppResult<ConnectionsResponse> {
+        let url = format!("{}/connections", DEVIN_APP_AUTH_BASE_URL);
+
+        // app.devin.ai 侧的实测请求体：product 为小写 "devin"（与 Windsurf 侧的 "Windsurf" 大小写不同）
+        let body = ConnectionsRequest {
+            product: "devin".to_string(),
+            email: email.to_string(),
+        };
+
+        let response = Self::apply_devin_app_headers(self.client.post(&url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                super::report_request_failure();
+                AppError::Network(format!("Devin App connections 请求失败: {}", e))
+            })?;
+
+        super::report_request_success();
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| AppError::Network(e.to_string()))?;
+
+        if !status.is_success() {
+            return Err(AppError::Api(format!(
+                "Devin App connections 返回状态 {}: {}",
+                status, text
+            )));
+        }
+
+        let parsed: ConnectionsResponse =
+            serde_json::from_str(&text).unwrap_or_else(|_| ConnectionsResponse::default());
+
+        Ok(parsed)
+    }
+
+    /// 向 Devin 原生侧发送邮箱验证码
+    ///
+    /// 端点：`POST https://app.devin.ai/api/auth1/email/start`
+    /// 请求体：`{"email":"...","mode":"signup"|"login"}`（**不携带 product 字段**，与 windsurf 侧 `email_start` 的关键差异）
+    /// 响应：`{"ok":true,"message":"Code sent.","email_verification_token":"<JWT>"}`
+    ///
+    /// 返回的 JWT payload 中会携带 `"product":"Devin"`，服务端据此在后续 email/complete 时
+    /// 将账号归属至 Devin 产品侧。
+    pub async fn devin_app_email_start(
+        &self,
+        email: &str,
+        mode: &str,
+    ) -> AppResult<EmailStartResponse> {
+        let url = format!("{}/email/start", DEVIN_APP_AUTH_BASE_URL);
+
+        // 复用 EmailStartRequest，但 product 固定传 None（serde `skip_serializing_if = Option::is_none`
+        // 使字段完全不出现在请求体里，与 HAR 实测一致）
+        let body = EmailStartRequest {
+            email: email.to_string(),
+            mode: mode.to_string(),
+            product: None,
+        };
+
+        let response = Self::apply_devin_app_headers(self.client.post(&url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                super::report_request_failure();
+                AppError::Network(format!("Devin App email/start 请求失败: {}", e))
+            })?;
+
+        super::report_request_success();
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| AppError::Network(e.to_string()))?;
+
+        if !status.is_success() {
+            return Err(Self::parse_email_start_error(status.as_u16(), &text));
+        }
+
+        serde_json::from_str::<EmailStartResponse>(&text).map_err(|e| {
+            AppError::Parse(format!(
+                "解析 Devin App email/start 响应失败: {}. Body: {}",
+                e, text
+            ))
+        })
+    }
+
+    /// 提交验证码完成 Devin 原生侧邮件流程
+    ///
+    /// 端点：`POST https://app.devin.ai/api/auth1/email/complete`
+    /// 请求体：`{"email_verification_token":"...","code":"...","mode":"signup"|"login"}`
+    /// （**不携带 password / name 字段**，与 windsurf 侧 `email_complete` 的关键差异）
+    ///
+    /// 响应：`{"token":"auth1_<52>","user_id":"user-<32>","email":"..."}`
+    /// 响应体结构与 windsurf 侧 `password/login`、`email/complete` 完全一致，可复用 `PasswordLoginResponse`。
+    pub async fn devin_app_email_complete(
+        &self,
+        email_verification_token: &str,
+        code: &str,
+        mode: &str,
+    ) -> AppResult<PasswordLoginResponse> {
+        let url = format!("{}/email/complete", DEVIN_APP_AUTH_BASE_URL);
+
+        // 复用 EmailCompleteRequest，password / name 均传 None
+        // （实测 app.devin.ai 侧不需要密码和姓名，纯邮箱验证码建号）
+        let body = EmailCompleteRequest {
+            email_verification_token: email_verification_token.to_string(),
+            code: code.to_string(),
+            mode: mode.to_string(),
+            password: None,
+            name: None,
+        };
+
+        let response = Self::apply_devin_app_headers(self.client.post(&url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                super::report_request_failure();
+                AppError::Network(format!("Devin App email/complete 请求失败: {}", e))
+            })?;
+
+        super::report_request_success();
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| AppError::Network(e.to_string()))?;
+
+        if !status.is_success() {
+            return Err(Self::parse_email_complete_error(status.as_u16(), &text));
+        }
+
+        serde_json::from_str::<PasswordLoginResponse>(&text).map_err(|e| {
+            AppError::Parse(format!(
+                "解析 Devin App email/complete 响应失败: {}. Body: {}",
+                e, text
+            ))
+        })
+    }
+
+    /// Devin 原生注册 + 桥接到 Windsurf 的完整流程组合
+    ///
+    /// 步骤：
+    /// 1. 调 `devin_app_email_complete(mode="signup")`，获得 Devin 侧 `auth1_token`
+    /// 2. 调 `WindsurfPostAuth(auth1_token, org_id)`，换取 Windsurf `session_token`
+    /// 3. 组装 `DevinLoginResult` 返回（与既有 `register_with_email_code` 输出结构一致，便于上层复用落库链路）
+    ///
+    /// 前置条件：调用方已通过 `devin_app_email_start(email, "signup")` 拿到 `email_verification_token`，
+    /// 并引导用户从邮箱读取 6 位验证码 `code`。
+    ///
+    /// 多组织处理：若返回的 orgs > 1 且调用方未传 `org_id`，结果的 `requires_org_selection=true`，
+    /// 由 UI 二次调用 `windsurf_post_auth(auth1_token, 选中 org_id)` 完成。
+    pub async fn register_native_with_email_code(
+        &self,
+        email_verification_token: &str,
+        code: &str,
+        org_id: Option<&str>,
+    ) -> AppResult<DevinLoginResult> {
+        let complete = self
+            .devin_app_email_complete(email_verification_token, code, "signup")
+            .await?;
+        self.post_auth_to_login_result(complete, org_id).await
+    }
+
+    // ==================== 错误翻译（接续 Windsurf 侧的错误翻译区） ====================
+
     /// `/password/reset-*` 错误翻译
     fn parse_reset_error(status: u16, body: &str) -> AppError {
         let lower = body.to_lowercase();
@@ -934,6 +1186,28 @@ impl Default for DevinAuthService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ==================== 错误识别辅助 ====================
+
+/// 判断 WindsurfPostAuth 错误是否为"Devin 新建账号 org 同步尚未就绪"的瞬时错误
+///
+/// 服务端在 Devin 账号新建后需要短暂时间把账号同步到 Windsurf 后端 org 关联表，
+/// 紧接着调 PostAuth 会返回 HTTP 404 + body 包含如下任一特征：
+/// - `no_eligible_organizations` / `no eligible organizations`
+/// - `code":"not_found"` 或 `"not_found"`
+///
+/// 仅对这些瞬时错误重试；验证码错、参数错、真实的账号不存在等错误保持 fail-fast。
+fn is_post_auth_org_sync_pending(err: &AppError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    // windsurf_post_auth 将错误封装为 "WindsurfPostAuth 返回状态 {status}: {body}"，
+    // 其中 status 含 "404" 且 body 通常包含 not_found / no_eligible_organizations
+    let is_404 = msg.contains("404");
+    let has_org_signal = msg.contains("no_eligible_org")
+        || msg.contains("no eligible organizations")
+        || msg.contains("not_found")
+        || msg.contains("not found");
+    is_404 && has_org_signal
 }
 
 // ==================== Protobuf 编解码（手写，保持零依赖） ====================

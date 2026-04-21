@@ -22,7 +22,11 @@
           <template #title>账号管理</template>
         </el-menu-item>
         
-        <el-sub-menu index="groups">
+        <el-sub-menu
+          index="groups"
+          class="groups-submenu"
+          popper-class="groups-submenu-popper"
+        >
           <template #title>
             <el-icon><Folder /></el-icon>
             <span>分组管理</span>
@@ -45,7 +49,7 @@
               </div>
             </div>
           </el-menu-item>
-          <el-menu-item index="add-group" @click="showAddGroupDialog">
+          <el-menu-item index="add-group" class="group-add-action" @click="showAddGroupDialog">
             <el-icon><Plus /></el-icon>
             添加分组
           </el-menu-item>
@@ -129,6 +133,8 @@
             <el-option label="Token过期" value="token_expires_at" />
             <el-option label="订阅到期" value="subscription_expires_at" />
             <el-option label="套餐类型" value="plan_name" />
+            <el-option label="日配额剩余%" value="daily_quota_remaining" />
+            <el-option label="周配额剩余%" value="weekly_quota_remaining" />
           </el-select>
           <el-tooltip :content="sortDirection === 'asc' ? '升序' : '降序'" placement="bottom">
             <el-button
@@ -323,7 +329,26 @@
                   </div>
                 </div>
               </div>
-              <!-- 第二行：选择器筛选 -->
+              <!-- 第二行：日/周配额剩余百分比（仅 billing_strategy === 2 (QUOTA) 的账号参与） -->
+              <div class="filter-row">
+                <div class="filter-item filter-item-range">
+                  <span class="filter-label">日配额剩余%</span>
+                  <div class="filter-range">
+                    <el-input-number v-model="filterForm.dailyQuotaPercentMin" :min="0" :max="100" :controls="false" placeholder="最小" size="small" />
+                    <span class="range-separator">-</span>
+                    <el-input-number v-model="filterForm.dailyQuotaPercentMax" :min="0" :max="100" :controls="false" placeholder="最大" size="small" />
+                  </div>
+                </div>
+                <div class="filter-item filter-item-range">
+                  <span class="filter-label">周配额剩余%</span>
+                  <div class="filter-range">
+                    <el-input-number v-model="filterForm.weeklyQuotaPercentMin" :min="0" :max="100" :controls="false" placeholder="最小" size="small" />
+                    <span class="range-separator">-</span>
+                    <el-input-number v-model="filterForm.weeklyQuotaPercentMax" :min="0" :max="100" :controls="false" placeholder="最大" size="small" />
+                  </div>
+                </div>
+              </div>
+              <!-- 第三行：选择器筛选 -->
               <div class="filter-row filter-row-select">
                 <div class="filter-item filter-item-select">
                   <span class="filter-label">套餐</span>
@@ -414,8 +439,12 @@
       v-model="showAbout"
       :current-email="currentWindsurfEmail"
       :windsurf-version="windsurfVersion"
+      @open-update-dialog="showUpdateDialog = true"
     />
-    
+
+    <!-- 自动更新对话框 -->
+    <UpdateDialog v-model="showUpdateDialog" :current-version="appVersion" />
+
     <AutoResetDialog v-model="showAutoResetDialog" />
     
     <!-- 虚拟卡生成对话框 -->
@@ -605,6 +634,8 @@ import StatsDialog from '@/components/StatsDialog.vue';
 import BillingDialog from '@/components/BillingDialog.vue';
 import AccountInfoDialog from '@/components/AccountInfoDialog.vue';
 import AboutDialog from '@/components/AboutDialog.vue';
+import UpdateDialog from '@/components/UpdateDialog.vue';
+import { useUpdaterStore } from '@/store/modules/updater';
 import BatchUpdatePlanDialog from '@/components/BatchUpdatePlanDialog.vue';
 import TagManageDialog from '@/components/TagManageDialog.vue';
 import AutoResetDialog from '@/components/AutoResetDialog.vue';
@@ -622,6 +653,8 @@ const currentWindsurfEmail = ref<string>('');
 const windsurfVersion = ref<string>('');
 const showBatchUpdatePlanDialog = ref(false);
 const showAbout = ref(false);
+const showUpdateDialog = ref(false);
+const updaterStore = useUpdaterStore();
 const showTagManageDialog = ref(false);
 const showBatchImportDialog = ref(false);
 const batchImportDialogRef = ref<InstanceType<typeof BatchImportDialog> | null>(null);
@@ -750,6 +783,11 @@ const filterForm = ref({
   totalQuotaMax: undefined as number | undefined,
   expiryDaysMin: undefined as number | undefined,
   expiryDaysMax: undefined as number | undefined,
+  // 日/周配额剩余百分比（0-100，仅 billing_strategy === 2 (QUOTA) 账号参与）
+  dailyQuotaPercentMin: undefined as number | undefined,
+  dailyQuotaPercentMax: undefined as number | undefined,
+  weeklyQuotaPercentMin: undefined as number | undefined,
+  weeklyQuotaPercentMax: undefined as number | undefined,
   selectedTags: [] as string[],
   selectedPlans: [] as string[],
   selectedDomains: [] as string[],
@@ -766,6 +804,10 @@ const hasActiveFilter = computed(() => {
     f.totalQuotaMax !== undefined ||
     f.expiryDaysMin !== undefined ||
     f.expiryDaysMax !== undefined ||
+    f.dailyQuotaPercentMin !== undefined ||
+    f.dailyQuotaPercentMax !== undefined ||
+    f.weeklyQuotaPercentMin !== undefined ||
+    f.weeklyQuotaPercentMax !== undefined ||
     (f.tags && f.tags.length > 0) ||
     (f.planNames && f.planNames.length > 0) ||
     (f.domains && f.domains.length > 0) ||
@@ -802,6 +844,10 @@ function applyFilters() {
     totalQuotaMax: filterForm.value.totalQuotaMax,
     expiryDaysMin: filterForm.value.expiryDaysMin,
     expiryDaysMax: filterForm.value.expiryDaysMax,
+    dailyQuotaPercentMin: filterForm.value.dailyQuotaPercentMin,
+    dailyQuotaPercentMax: filterForm.value.dailyQuotaPercentMax,
+    weeklyQuotaPercentMin: filterForm.value.weeklyQuotaPercentMin,
+    weeklyQuotaPercentMax: filterForm.value.weeklyQuotaPercentMax,
     tags: filterForm.value.selectedTags.length > 0 ? filterForm.value.selectedTags : undefined,
     planNames: filterForm.value.selectedPlans.length > 0 ? filterForm.value.selectedPlans : undefined,
     domains: filterForm.value.selectedDomains.length > 0 ? filterForm.value.selectedDomains : undefined,
@@ -818,6 +864,10 @@ function clearAllFilters() {
     totalQuotaMax: undefined,
     expiryDaysMin: undefined,
     expiryDaysMax: undefined,
+    dailyQuotaPercentMin: undefined,
+    dailyQuotaPercentMax: undefined,
+    weeklyQuotaPercentMin: undefined,
+    weeklyQuotaPercentMax: undefined,
     selectedTags: [],
     selectedPlans: [],
     selectedDomains: [],
@@ -1133,11 +1183,11 @@ function handleBatchImport() {
 
 // 批量导入确认（从对话框接收数据）
 async function handleBatchImportConfirm(
-  accountsToImport: Array<{ email: string; password: string; remark: string; refreshToken?: string; sessionToken?: string }>,
+  accountsToImport: Array<{ email: string; password: string; remark: string; refreshToken?: string; sessionToken?: string; auth1Token?: string }>,
   autoLogin: boolean,
   group: string = '默认分组',
   tags: string[] = [],
-  mode: 'password' | 'refresh_token' | 'devin_session_token' = 'password',
+  mode: 'password' | 'refresh_token' | 'devin_session_token' | 'devin_auth1_token' = 'password',
   authProvider: 'firebase' | 'devin' | 'smart' = 'firebase'
 ) {
   // 获取并发设置
@@ -1147,6 +1197,12 @@ async function handleBatchImportConfirm(
   // === Devin Session Token 模式：逐条调 add_account_by_devin_session_token，不走 sniff/importTask ===
   if (mode === 'devin_session_token') {
     await handleDevinSessionTokenBatchImport(accountsToImport, group, tags, unlimitedConcurrent, concurrencyLimit);
+    return;
+  }
+
+  // === Devin Auth1 Token 模式：逐条调 add_account_by_devin_auth1_token（autoSelectPrimaryOrg=true） ===
+  if (mode === 'devin_auth1_token') {
+    await handleDevinAuth1TokenBatchImport(accountsToImport, group, tags, unlimitedConcurrent, concurrencyLimit);
     return;
   }
 
@@ -1495,6 +1551,107 @@ async function handleBatchImportConfirm(
 }
 
 /**
+ * Devin Auth1 Token 批量导入辅助函数
+ *
+ * 逐条调 devinApi.addAccountByAuth1Token 并开启 autoSelectPrimaryOrg：
+ * 后端用 auth1_token 换取 session_token → 反查 GetCurrentUser 拿 email / 配额 → 落库。
+ * 多组织场景自动选择 primary org（批量场景不弹组织选择对话框，保证流程不被中断）。
+ *
+ * 与 handleDevinSessionTokenBatchImport 对称，区别在于落库后账号的 devin_auth1_token 字段已填充，
+ * 后续 session 到期可直接用 refresh_devin_session 刷新，无需重新获取 token。
+ */
+async function handleDevinAuth1TokenBatchImport(
+  items: Array<{ email: string; password: string; remark: string; refreshToken?: string; sessionToken?: string; auth1Token?: string }>,
+  group: string,
+  tags: string[],
+  unlimitedConcurrent: boolean,
+  concurrencyLimit: number,
+) {
+  let progressMsg = ElMessage({
+    message: unlimitedConcurrent
+      ? `正在全量并发导入 ${items.length} 个 Devin Auth1 Token...`
+      : `正在导入 ${items.length} 个 Devin Auth1 Token（并发${concurrencyLimit}）...`,
+    duration: 0,
+    icon: Loading,
+  });
+
+  const results: Array<{ email: string; success: boolean; error?: string }> = [];
+
+  const importTask = async (item: { remark: string; auth1Token?: string }) => {
+    if (!item.auth1Token) {
+      return { email: '(missing token)', success: false, error: '缺少 auth1Token' };
+    }
+    try {
+      const result = await devinApi.addAccountByAuth1Token({
+        auth1Token: item.auth1Token,
+        nickname: item.remark || undefined,
+        tags: tags.length > 0 ? [...tags] : [],
+        group: group,
+        autoSelectPrimaryOrg: true,
+      });
+      if (result.success) {
+        return { email: result.email || '(unknown)', success: true };
+      }
+      return {
+        email: result.email || '(unknown)',
+        success: false,
+        error: result.message || '导入失败',
+      };
+    } catch (e) {
+      return {
+        email: item.auth1Token.slice(0, 30) + '...',
+        success: false,
+        error: String(e),
+      };
+    }
+  };
+
+  try {
+    if (unlimitedConcurrent) {
+      const all = await Promise.all(items.map(importTask));
+      results.push(...all);
+    } else {
+      for (let i = 0; i < items.length; i += concurrencyLimit) {
+        const batch = items.slice(i, i + concurrencyLimit);
+        const batchResults = await Promise.all(batch.map(importTask));
+        results.push(...batchResults);
+        progressMsg.close();
+        progressMsg = ElMessage({
+          message: `导入进度: ${results.length}/${items.length}`,
+          duration: 0,
+          icon: Loading,
+        });
+      }
+    }
+
+    progressMsg.close();
+    showBatchImportDialog.value = false;
+    batchImportDialogRef.value?.resetImporting();
+
+    const succeeded = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success);
+    if (succeeded > 0) {
+      let msg = `成功通过 Auth1 Token 导入 ${succeeded} 个 Devin 账号`;
+      if (failed.length > 0) msg += `，失败 ${failed.length} 个`;
+      ElMessage.success({ message: msg, duration: 5000, showClose: true });
+      await accountsStore.loadAccounts();
+    } else {
+      const details = failed.slice(0, 3).map(f => `${f.email}（${f.error || '未知'}）`).join('\n');
+      ElMessage.error({
+        message: `没有成功导入任何账号\n${details}${failed.length > 3 ? '\n...' : ''}`,
+        duration: 5000,
+        showClose: true,
+      });
+    }
+  } catch (e) {
+    progressMsg.close();
+    showBatchImportDialog.value = false;
+    batchImportDialogRef.value?.resetImporting();
+    ElMessage.error(`批量导入失败: ${e}`);
+  }
+}
+
+/**
  * Devin Session Token 批量导入辅助函数
  *
  * 逐条调 devinApi.addAccountBySessionToken，后端反查 GetCurrentUser 拿 email / 配额并落库。
@@ -1700,6 +1857,25 @@ async function handleExportAccounts(selectedOnly: boolean = false) {
       }
     }
     
+    // 按待导出账号集合能力，决定 Devin 两个选项是否渲染
+    // - Auth1 Token：至少一个账号持有 devin_auth1_token
+    // - Session Token：至少一个 Devin 认证提供方账号且 token 非空
+    const hasDevinAuth1 = accounts.some(a => !!a.devin_auth1_token);
+    const hasDevinSession = accounts.some(a => a.auth_provider === 'devin' && !!a.token);
+
+    const devinAuth1OptionHtml = hasDevinAuth1 ? `
+          <label style="display: block; margin: 10px 0; cursor: pointer; font-size: 14px;">
+            <input type="radio" name="exportContent" value="devin_auth1_token" style="margin-right: 10px; cursor: pointer; transform: scale(1.2);" />
+            <span style="font-weight: 500;">邮箱 + Devin Auth1 Token</span>
+            <span style="color: #909399; margin-left: 8px;">可二次换取 session / 换机迁移</span>
+          </label>` : '';
+    const devinSessionOptionHtml = hasDevinSession ? `
+          <label style="display: block; margin: 10px 0; cursor: pointer; font-size: 14px;">
+            <input type="radio" name="exportContent" value="devin_session_token" style="margin-right: 10px; cursor: pointer; transform: scale(1.2);" />
+            <span style="font-weight: 500;">邮箱 + Devin Session Token</span>
+            <span style="color: #909399; margin-left: 8px;">当前登录会话凭证（短期有效）</span>
+          </label>` : '';
+
     // 创建 HTML 字符串形式的单选按钮
     const radioHtml = `
       <div style="padding: 20px 0;">
@@ -1714,7 +1890,7 @@ async function handleExportAccounts(selectedOnly: boolean = false) {
             <input type="radio" name="exportContent" value="refresh_token" style="margin-right: 10px; cursor: pointer; transform: scale(1.2);" />
             <span style="font-weight: 500;">邮箱 + Refresh Token</span>
             <span style="color: #909399; margin-left: 8px;">可直接刷新获取账号信息</span>
-          </label>
+          </label>${devinAuth1OptionHtml}${devinSessionOptionHtml}
         </div>
         <div style="margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #ebeef5;">
           <div style="font-weight: 500; margin-bottom: 10px; color: #606266;">导出格式</div>
@@ -1778,20 +1954,36 @@ async function handleExportAccounts(selectedOnly: boolean = false) {
     const target = selectedTargetRadio ? selectedTargetRadio.value : 'file';
     
     // 根据导出内容类型获取凭证
+    // devin_session_token 仅对 auth_provider==='devin' 的账号有意义：
+    // 旧 Firebase 账号的 token 字段持有 Firebase access_token，将其作为 Devin session 导出会产生误导，因此置空
     const getCredential = (account: any) => {
-      if (exportContent === 'refresh_token') {
-        return account.refresh_token || '';
+      switch (exportContent) {
+        case 'refresh_token':
+          return account.refresh_token || '';
+        case 'devin_auth1_token':
+          return account.devin_auth1_token || '';
+        case 'devin_session_token':
+          return account.auth_provider === 'devin' ? (account.token || '') : '';
+        case 'password':
+        default:
+          return account.password || '';
       }
-      return account.password || '';
     };
-    
-    const credentialLabel = exportContent === 'refresh_token' ? 'Refresh Token' : '密码';
-    const credentialKey = exportContent === 'refresh_token' ? 'refresh_token' : 'password';
-    
+
+    const credentialMeta: Record<string, { label: string; key: string; fileSuffix: string }> = {
+      password:            { label: '密码',                key: 'password',            fileSuffix: ''        },
+      refresh_token:       { label: 'Refresh Token',       key: 'refresh_token',       fileSuffix: '_token'  },
+      devin_auth1_token:   { label: 'Devin Auth1 Token',   key: 'devin_auth1_token',   fileSuffix: '_auth1'  },
+      devin_session_token: { label: 'Devin Session Token', key: 'devin_session_token', fileSuffix: '_session'},
+    };
+    const meta = credentialMeta[exportContent] || credentialMeta.password;
+    const credentialLabel = meta.label;
+    const credentialKey = meta.key;
+
     let content = '';
     let filename = '';
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-    const fileSuffix = exportContent === 'refresh_token' ? '_token' : '';
+    const fileSuffix = meta.fileSuffix;
     
     switch(format) {
       case '1': // CSV
@@ -2011,6 +2203,18 @@ onMounted(async () => {
   
   // 初始化自动重置定时器
   initAutoResetTimers();
+
+  // 启动静默检测更新（延迟 3 秒，避开启动高峰；store 内部 24h 防抖 + 跳过版本）
+  window.setTimeout(async () => {
+    try {
+      const hasUpdate = await updaterStore.checkUpdate(true);
+      if (hasUpdate) {
+        showUpdateDialog.value = true;
+      }
+    } catch (e) {
+      console.warn('[Updater] silent check failed:', e);
+    }
+  }, 3000);
 });
 
 // 组件卸载时清除自动重置定时器
@@ -2891,4 +3095,92 @@ onUnmounted(() => {
   color: #a0aec0;
 }
 
+/* ==================== 分组管理子菜单：超出限高后局部滚动 ====================
+ * 背景：全局 `.sidebar :deep(::-webkit-scrollbar) { display: none !important; }` 强制隐藏
+ *   了侧边栏所有滚动条。当分组数量较多（如 > 8 个）时，el-sub-menu 展开
+ *   区会把下方其它菜单项顶出视口，用户无法访问亦无法滚动。
+ *
+ * 方案：只在 .groups-submenu 的展开容器（:deep(.el-menu)）上重新启用滚动：
+ *   1. 限制 max-height（约 8 项高度），超出则出现滚动条；
+ *   2. 用更高特异性 + !important 覆盖全局 scrollbar 隐藏规则，定制一条 6px 细滚动条；
+ *   3. "添加分组"按钮用 position: sticky 钉在底部，滚动时始终可见。
+ * 折叠态（collapse）下 sub-menu 是 popper 形式渲染在 <body> 下，不会命中本规则，无副作用。
+ */
+
+.sidebar-menu .groups-submenu :deep(.el-menu) {
+  max-height: 360px;
+  overflow-y: auto !important;
+  overflow-x: hidden;
+  scrollbar-width: thin !important;
+  -ms-overflow-style: auto !important;
+}
+
+.sidebar-menu .groups-submenu :deep(.el-menu)::-webkit-scrollbar {
+  display: block !important;
+  width: 6px !important;
+  background: transparent !important;
+}
+
+.sidebar-menu .groups-submenu :deep(.el-menu)::-webkit-scrollbar-thumb {
+  background-color: var(--el-border-color) !important;
+  border-radius: 3px !important;
+}
+
+.sidebar-menu .groups-submenu :deep(.el-menu)::-webkit-scrollbar-thumb:hover {
+  background-color: var(--el-border-color-darker) !important;
+}
+
+/* “添加分组”固定在展开区底部：滚动分组列表时该按钮始终可见 */
+.sidebar-menu .groups-submenu :deep(.group-add-action) {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background-color: var(--el-menu-bg-color);
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+</style>
+
+<!--
+  折叠态 sub-menu 的 popper 被 Element Plus 通过 Teleport 渲染到 <body> 下，
+  已脱离本组件的 DOM 子树；scoped style 的 `:deep()` 无法穿透 Teleport，
+  因此折叠态的滚动样式必须放在下面这个“非 scoped”的 style 块里，
+  通过 popper-class="groups-submenu-popper" 精准锁定，避免污染全局。
+-->
+<style>
+/* ==================== 分组管理子菜单：折叠态 popper 浮层 ==================== */
+
+/* popper 的 ul.el-menu 限高并启用滚动；容器相对定位是为了让 sticky 的“添加分组”生效 */
+.groups-submenu-popper .el-menu {
+  max-height: 70vh;
+  overflow-y: auto !important;
+  overflow-x: hidden;
+  position: relative;
+  scrollbar-width: thin !important;
+  -ms-overflow-style: auto !important;
+}
+
+.groups-submenu-popper .el-menu::-webkit-scrollbar {
+  display: block !important;
+  width: 6px !important;
+  background: transparent !important;
+}
+
+.groups-submenu-popper .el-menu::-webkit-scrollbar-thumb {
+  background-color: var(--el-border-color) !important;
+  border-radius: 3px !important;
+}
+
+.groups-submenu-popper .el-menu::-webkit-scrollbar-thumb:hover {
+  background-color: var(--el-border-color-darker) !important;
+}
+
+/* “添加分组”按钮贴底：滚动分组列表时始终可见 */
+.groups-submenu-popper .el-menu .group-add-action {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background-color: var(--el-bg-color-overlay, var(--el-menu-bg-color));
+  border-top: 1px solid var(--el-border-color-lighter);
+}
 </style>

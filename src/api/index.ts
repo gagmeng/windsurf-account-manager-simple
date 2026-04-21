@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Account, Settings, OperationLog, UpdateSeatsResult, BillingInfo, BatchResult, GlobalTag, SortField, SortDirection, SortConfig, DevinLoginResult, WindsurfOrg, CheckUserLoginMethodResult, LoginMethodSniffResult } from '@/types';
+import type { Account, Settings, OperationLog, UpdateSeatsResult, BillingInfo, BatchResult, GlobalTag, SortField, SortDirection, SortConfig, DevinLoginResult, WindsurfOrg, CheckUserLoginMethodResult, LoginMethodSniffResult, EmailStartResponse, ConnectionsResponse, DevinPasswordLoginResponse } from '@/types';
 import type { AnalyticsData } from '@/types/analytics';
 
 // 账号管理API
@@ -635,6 +635,230 @@ export const devinApi = {
       tags: params.tags,
       group: params.group,
     });
+  },
+
+  /**
+   * 通过已有的 Devin `auth1_token`（格式 `auth1_<52字符>`）直接导入账号
+   *
+   * 适用场景：用户从浏览器 localStorage 的 `devin_auth1_token` 键拷出的迁入路径。
+   * 与 `addAccountBySessionToken` 对称，但多保留 auth1_token，让后续 `refreshSession` 能正常工作。
+   *
+   * 后端内部：`windsurf_post_auth(auth1_token, org_id)` → `GetCurrentUser` 反查 email → 落库。
+   *
+   * 多组织处理：
+   * - `autoSelectPrimaryOrg` 省略或 false：返回 `requires_org_selection=true` + email/auth1_token/orgs，
+   *   前端需调 `addAccountWithOrg` 完成二次选 org
+   * - `autoSelectPrimaryOrg: true`（批量导入场景）：自动用 primary org 落库
+   */
+  async addAccountByAuth1Token(params: {
+    auth1Token: string;
+    orgId?: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+    autoSelectPrimaryOrg?: boolean;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_auth1_token', {
+      auth1Token: params.auth1Token,
+      orgId: params.orgId,
+      nickname: params.nickname,
+      tags: params.tags,
+      group: params.group,
+      autoSelectPrimaryOrg: params.autoSelectPrimaryOrg,
+    });
+  },
+
+  // ========== 邮箱验证码（无密码登录） ==========
+
+  /**
+   * 发送邮箱验证码（底层接口）
+   *
+   * - `mode`：`"signup"` 或 `"login"`（无密码邮件登录），默认 `"login"`
+   * - `product`：默认 `"Windsurf"`；服务端对 `/email/start` 强制 literal 校验，
+   *   仅接受 `"Devin"` / `"Windsurf"`（首字母大写），传小写会返回 422。
+   *
+   * 服务端向邮箱发送 6 位验证码，并返回 `email_verification_token`，
+   * 供后续 `addAccountByEmailLogin` 回传使用。
+   */
+  async emailStart(
+    email: string,
+    mode: 'signup' | 'login' = 'login',
+    product: 'Windsurf' | 'Devin' = 'Windsurf'
+  ): Promise<EmailStartResponse> {
+    return await invoke('devin_email_start', { email, mode, product });
+  },
+
+  /**
+   * 完整流程：邮箱验证码注册新账号 + 建账号
+   *
+   * 前置：调用方已通过 `emailStart(email, "signup")` 拿到 `email_verification_token`，
+   * 并引导用户读取邮件中的 6 位验证码。
+   *
+   * 服务端 `mode=signup` 完成注册并返回新账号的 auth1_token，
+   * 多组织场景下返回 `requires_org_selection=true` + orgs，UI 需调 `addAccountWithOrg` 二次完成。
+   */
+  async addAccountByRegister(params: {
+    email: string;
+    emailVerificationToken: string;
+    code: string;
+    password: string;
+    name: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+    orgId?: string;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_register', params);
+  },
+
+  /**
+   * 完整流程：无密码邮件验证码登录 + 建账号
+   *
+   * 用于从 SSO 迁移且无密码、或忘记密码的已存在 Devin 账号。
+   * 前置：调用方已通过 `emailStart(email, "login")` 拿到 `email_verification_token`，
+   * 并引导用户读取邮件中的 6 位验证码。
+   *
+   * 服务端 `mode=login` 时**不会创建新账号**，仅返回已有账号的 auth1_token。
+   * 多组织场景下返回 `requires_org_selection=true` + orgs，UI 需调 `addAccountWithOrg` 二次完成。
+   */
+  async addAccountByEmailLogin(params: {
+    email: string;
+    emailVerificationToken: string;
+    code: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+    orgId?: string;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_email_login', params);
+  },
+
+  // ========== Devin 原生站点（app.devin.ai）注册通道 ==========
+  //
+  // 与上面 Windsurf 侧 `_devin-auth` 通道的关键区别：
+  // - 端口：`https://app.devin.ai/api/auth1/*`（Devin 官方后端直连）
+  // - `email/start` 请求体不携带 `product` 字段
+  // - `email/complete` 请求体不携带 `password` / `name` 字段（纯邮箱验证码建号）
+  // - 注册出的账号 JWT 中 `product == "Devin"`，主归属 Devin 产品侧
+  // - 后端 `addAccountByNativeRegister` 在注册成功后自动调 WindsurfPostAuth 桥接到 Windsurf，
+  //   落库账号既可用 Devin 产品功能（auth1_token），也可用 Windsurf 产品 API（session_token）
+
+  /**
+   * 查询 Devin 原生侧（app.devin.ai）邮箱可用的连接方式（可选预检）
+   *
+   * 响应的 `connections` 数组会额外包含 `windsurf-bridge` 条目，
+   * 响应的 `auth_method.method` 字段指示邮箱是否已注册（`"not_found"` = 未注册）。
+   */
+  async nativeCheckConnections(email: string): Promise<ConnectionsResponse> {
+    return await invoke('devin_app_check_connections', { email });
+  },
+
+  /**
+   * 向 Devin 原生侧发送邮箱验证码（底层接口）
+   *
+   * @param email 目标邮箱
+   * @param mode  `"signup"` 注册新账号；`"login"` 已有 Devin 账号的无密码邮件登录。默认 `"signup"`
+   *
+   * 返回 `EmailStartResponse`，供后续 `addAccountByNativeRegister` 回传 `email_verification_token`。
+   */
+  async nativeEmailStart(
+    email: string,
+    mode: 'signup' | 'login' = 'signup'
+  ): Promise<EmailStartResponse> {
+    return await invoke('devin_app_email_start', { email, mode });
+  },
+
+  /**
+   * 提交验证码完成 Devin 原生侧邮件流程（底层接口）
+   *
+   * 仅在需要纯粹调用 `/api/auth1/email/complete`（不落库、不桥接）时使用；
+   * 日常注册请直接用 `addAccountByNativeRegister` 一键完成。
+   */
+  async nativeEmailComplete(params: {
+    emailVerificationToken: string;
+    code: string;
+    mode: 'signup' | 'login';
+  }): Promise<DevinPasswordLoginResponse> {
+    return await invoke('devin_app_email_complete', params);
+  },
+
+  /**
+   * 完整流程：Devin 原生注册 → 自动桥接 Windsurf → 落库为新账号
+   *
+   * 前置：调用方已通过 `nativeEmailStart(email, "signup")` 拿到 `email_verification_token`，
+   * 并引导用户读取邮件中的 6 位验证码。
+   *
+   * 与 `addAccountByRegister`（Windsurf 侧注册）的差异：
+   * - 不需要 `password` 与 `name` 入参（Devin 原生注册是"纯邮箱验证码"建号）
+   * - 账号落库时 `password` 字段留空，用户可后续在 Devin 产品侧自行设置密码
+   * - JWT 归属为 Devin，后续 Devin 产品功能（auth1_token）可直接使用
+   *
+   * 多组织场景下返回 `requires_org_selection=true` + orgs，UI 需调 `addAccountWithOrg` 二次完成（与 Windsurf 侧一致）。
+   */
+  async addAccountByNativeRegister(params: {
+    email: string;
+    emailVerificationToken: string;
+    code: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+    orgId?: string;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_native_register', params);
+  },
+
+  // ==================== Firebase ↔ Devin 账号互转 ====================
+
+  /**
+   * 把 Firebase 账号转换为 Devin 登录方式
+   *
+   * 场景：官方将老 Firebase 账号迁移到 Devin 体系（密码未变），本地帐号卡仍是
+   * Firebase 配置。调用后复用账号已存的明文密码走 Devin 登录流程。
+   *
+   * 返回：
+   * - success=true：已切换到 Devin 体系
+   * - success=false, already_converted=true：账号已是 Devin 体系
+   * - success=false, requires_org_selection=true：多组织需选择，由调用方
+   *   弹出组织选择后再次调本方法并传入 orgId
+   */
+  async convertAccountToDevin(params: {
+    id: string;
+    orgId?: string;
+  }): Promise<{
+    success: boolean;
+    already_converted?: boolean;
+    requires_org_selection?: boolean;
+    orgs?: Array<{ id: string; name: string }>;
+    email?: string;
+    account?: any;
+    message?: string;
+  }> {
+    return await invoke('convert_account_to_devin', {
+      id: params.id,
+      orgId: params.orgId,
+    });
+  },
+
+  /**
+   * 把 Devin 账号转换为 Firebase 登录方式
+   *
+   * 场景：官方回调某些帐号到 Firebase 体系、或用户误转后需要还原。
+   * 调用后复用账号已存的明文密码走 Firebase signInWithPassword。
+   *
+   * 返回：
+   * - success=true：已切换到 Firebase 体系
+   * - success=false, already_converted=true：账号已是 Firebase 体系
+   */
+  async convertAccountToFirebase(params: {
+    id: string;
+  }): Promise<{
+    success: boolean;
+    already_converted?: boolean;
+    email?: string;
+    account?: any;
+    message?: string;
+  }> {
+    return await invoke('convert_account_to_firebase', { id: params.id });
   },
 };
 

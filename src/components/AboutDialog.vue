@@ -36,8 +36,20 @@
           <span class="gradient-text">Windsurf </span>
           <span>Account Manager</span>
         </h2>
-        <div class="version-badge">
-          <span>v{{ appVersion }}</span>
+        <div class="version-row">
+          <div class="version-badge">
+            <span>v{{ appVersion }}</span>
+          </div>
+          <el-button
+            :icon="Refresh"
+            :loading="updaterStore.isBusy"
+            size="small"
+            round
+            class="check-update-btn"
+            @click="handleCheckUpdate"
+          >
+            {{ checkButtonText }}
+          </el-button>
         </div>
       </div>
 
@@ -227,6 +239,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { ElMessage } from 'element-plus';
 import { 
   Monitor, 
   UserFilled, 
@@ -247,6 +260,9 @@ import {
   Star,
   Coffee
 } from '@element-plus/icons-vue';
+import { useUpdaterStore } from '@/store/modules/updater';
+
+const updaterStore = useUpdaterStore();
 
 const props = defineProps<{
   modelValue: boolean;
@@ -256,6 +272,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
+  'open-update-dialog': [];
 }>();
 
 const visible = computed({
@@ -275,6 +292,47 @@ onMounted(async () => {
     console.error('Failed to get app version:', error);
   }
 });
+
+const checkButtonText = computed(() => {
+  switch (updaterStore.phase) {
+    case 'checking':
+      return '检查中...';
+    case 'available':
+      return '立即更新';
+    case 'downloading':
+      return '下载中...';
+    case 'installing':
+      return '安装中...';
+    case 'ready':
+      return '重启应用';
+    default:
+      return '检查更新';
+  }
+});
+
+async function handleCheckUpdate() {
+  // 已有可用更新或下载完成时，直接把更新对话框拉起来，由 UpdateDialog 接管
+  if (updaterStore.phase === 'available' || updaterStore.phase === 'downloading'
+      || updaterStore.phase === 'installing' || updaterStore.phase === 'ready') {
+    emit('open-update-dialog');
+    return;
+  }
+
+  // 手动触发：忽略 24h 防抖
+  const hasUpdate = await updaterStore.checkUpdate(false);
+  if (hasUpdate) {
+    emit('open-update-dialog');
+    return;
+  }
+
+  if (updaterStore.phase === 'error') {
+    ElMessage.error(`检查更新失败: ${updaterStore.error || '未知错误'}`);
+    updaterStore.dismiss();
+  } else if (updaterStore.phase === 'up_to_date') {
+    ElMessage.success(`已是最新版本 v${appVersion.value}`);
+    updaterStore.dismiss();
+  }
+}
 
 function handleClosed() {
   emit('update:modelValue', false);
@@ -402,6 +460,27 @@ function handleClosed() {
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.check-update-btn {
+  background: rgba(255, 255, 255, 0.15) !important;
+  border: 1px solid rgba(255, 255, 255, 0.3) !important;
+  color: #fff !important;
+  backdrop-filter: blur(10px);
+  transition: all 0.2s ease;
+}
+
+.check-update-btn:hover {
+  background: rgba(255, 255, 255, 0.28) !important;
+  border-color: rgba(255, 255, 255, 0.5) !important;
 }
 
 .version-badge {

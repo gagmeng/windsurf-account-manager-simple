@@ -40,6 +40,8 @@ pub enum SortField {
     TokenExpiresAt,   // Token过期时间
     SubscriptionExpiresAt, // 订阅到期时间
     PlanName,         // 套餐类型
+    DailyQuotaRemaining,   // 日配额剩余百分比 (仅 billing_strategy=2(QUOTA) 有效)
+    WeeklyQuotaRemaining,  // 周配额剩余百分比 (仅 billing_strategy=2(QUOTA) 有效)
 }
 
 impl Default for SortField {

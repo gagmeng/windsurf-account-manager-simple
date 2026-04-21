@@ -8,6 +8,27 @@ use std::sync::Arc;
 use tauri::State;
 use crate::repository::DataStore;
 
+// ==================== 无感换号补丁常量（单一真源） ====================
+//
+// 这两条正则同时被 `apply_seamless_patch_internal` 与 `check_patch_status` 消费，
+// 用于判定 extension.js 是否仍保留未打补丁时的原始结构。抽成模块级常量是为了
+// 避免历史上两处判定逻辑漂移（检测用"补丁标识字符串"、打补丁用"pattern 匹配"，
+// 导致 UI 显示"未安装"但 apply 却返回"已打补丁"的不一致）。
+//
+// 维护守则：修改 pattern 时必须同步确认 apply 分支的 replacement 仍能命中新结构，
+// 并在 `CURRENT_VERSION_MARKER` 登记新版本注入代码的特征字符串。
+const PATTERN_URI_HANDLER_ORIGINAL: &str = r#"this\._uriHandler\.event\((\w+)=>\{"/refresh-authentication-session"===(\w+)\.path&&\(0,(\w+)\.refreshAuthenticationSession\)\(\)\}\)"#;
+const PATTERN_TIMEOUT_ORIGINAL: &str = r#",new Promise\(\((\w+),(\w+)\)=>setTimeout\(\(\)=>\{(\w+)\(new (\w+)\)\},18e4\)\)"#;
+/// 第 3 条：新版 Windsurf - Next 的 `maybeHandleUriWithToken` 在切号时弹出的
+/// "Are you sure you want to log in using a different account?" 模态 prompt。
+/// 捕获 `s.window.showWarningMessage(...)` 的 s 变量名（bundle 每次构建可能不同）。
+/// 替换策略：把整个 `if("Yes"===await ...showWarningMessage(...))` 条件换成 `if(true)`，
+/// 原条件的 if-body 是单语句 `try{...}catch{...}`（无大括号包裹），因此仅改 condition 即可
+/// 完全旁路 prompt、语法保持合法、无需改动 body 结构。
+const PATTERN_DIFF_ACCOUNT_PROMPT_ORIGINAL: &str = r#"if\("Yes"===await (\w+)\.window\.showWarningMessage\("Are you sure you want to log in using a different account\?",\{modal:!0\},"Yes"\)\)"#;
+/// 当前版本注入代码独有的特征字符串，用于辅助判别"已安装的是当前版本还是历史/第三方版本"
+const CURRENT_VERSION_MARKER: &str = "Failed to handle OAuth callback";
+
 /// 客户端配置信息
 struct ClientConfig {
     /// 进程名（不含 .exe）
@@ -208,12 +229,55 @@ pub async fn apply_seamless_patch_internal(
         return Err(format!("extension.js 文件不存在: {:?}", extension_file));
     }
     
-    // 1. 管理备份文件（最多保留3份）
     let parent_dir = extension_file.parent()
-        .ok_or("无法获取父目录")?;
+        .ok_or("无法获取父目录")?
+        .to_path_buf();
     
-    // 查找所有现有备份文件
-    let mut backup_files: Vec<PathBuf> = fs::read_dir(parent_dir)
+    // 1. 读取现有 extension.js 内容
+    let content = fs::read_to_string(&extension_file)
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+    
+    // 2. 编译与 check_patch_status 共享的 pattern（单一真源，避免判定漂移）
+    let pattern1 = Regex::new(PATTERN_URI_HANDLER_ORIGINAL)
+        .map_err(|e| format!("正则表达式错误: {}", e))?;
+    let pattern2 = Regex::new(PATTERN_TIMEOUT_ORIGINAL)
+        .map_err(|e| format!("正则表达式错误2: {}", e))?;
+    let pattern3 = Regex::new(PATTERN_DIFF_ACCOUNT_PROMPT_ORIGINAL)
+        .map_err(|e| format!("正则表达式错误3: {}", e))?;
+    
+    // 3. Dry-run 判定：三条原始 pattern 都匹配不上 = 已被当前版本补丁完整改写过。
+    //    此时跳过备份创建（避免每次点"启用"都往目录堆一份"含补丁"的废备份），
+    //    仅把 settings 同步到磁盘实际状态，让前端 UI 一致后返回。
+    //    注：只打过 1+2 但缺 3 的历史补丁会命中 apply 分支，走"增量升级"补上 p3。
+    let pattern1_still_original = pattern1.is_match(&content);
+    let pattern2_still_original = pattern2.is_match(&content);
+    let pattern3_still_original = pattern3.is_match(&content);
+    if !pattern1_still_original && !pattern2_still_original && !pattern3_still_original {
+        let mut settings = data_store.get_settings().await.map_err(|e| e.to_string())?;
+        settings.seamless_switch_enabled = true;
+        settings.windsurf_path = Some(windsurf_path.to_string());
+        // 备份路径兜底：当前未记录或已失效时，从目录挑最新的现有备份回填，
+        // 让后续"还原补丁"操作有一个可用 fallback。
+        let backup_ok = settings.patch_backup_path
+            .as_deref()
+            .map(|p| PathBuf::from(p).exists())
+            .unwrap_or(false);
+        if !backup_ok {
+            if let Ok(latest) = find_latest_backup(&parent_dir, &None) {
+                settings.patch_backup_path = Some(latest.to_string_lossy().to_string());
+            }
+        }
+        data_store.update_settings(settings).await.map_err(|e| e.to_string())?;
+        
+        return Ok(serde_json::json!({
+            "success": true,
+            "already_patched": true,
+            "message": "补丁已经应用过了"
+        }));
+    }
+    
+    // 4. 未打补丁：先做备份轮转（最多保留 3 份）
+    let mut backup_files: Vec<PathBuf> = fs::read_dir(&parent_dir)
         .map_err(|e| format!("读取目录失败: {}", e))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
@@ -232,7 +296,6 @@ pub async fn apply_seamless_patch_internal(
             .ok()
     });
     
-    // 如果备份文件数量达到3个或更多，删除最早的备份
     while backup_files.len() >= 3 {
         if let Some(oldest) = backup_files.first() {
             fs::remove_file(oldest)
@@ -244,33 +307,24 @@ pub async fn apply_seamless_patch_internal(
         }
     }
     
-    // 创建新的备份文件
+    // 5. 新建备份文件（仅在确认需要修改后才创建，避免无意义 I/O 与垃圾备份）
     let backup_file = extension_file.with_extension(&format!(
         "js.backup.{}",
         Local::now().format("%Y%m%d_%H%M%S")
     ));
-    
     fs::copy(&extension_file, &backup_file)
         .map_err(|e| format!("备份失败: {}", e))?;
     
-    // 2. 读取文件内容
-    let content = fs::read_to_string(&extension_file)
-        .map_err(|e| format!("读取文件失败: {}", e))?;
-    
+    // 6. 应用修改
     let mut modified_content = content.clone();
-    let mut modifications = vec![];
+    let mut modifications: Vec<&str> = vec![];
     
-    // 3. 应用修改1: 添加全局 OAuth 回调处理器
-    let pattern1_str = r#"this\._uriHandler\.event\((\w+)=>\{"/refresh-authentication-session"===(\w+)\.path&&\(0,(\w+)\.refreshAuthenticationSession\)\(\)\}\)"#;
-    let pattern1 = Regex::new(pattern1_str)
-        .map_err(|e| format!("正则表达式错误: {}", e))?;
-    
+    // 6.1 添加全局 OAuth 回调处理器
     if let Some(captures) = pattern1.captures(&modified_content) {
         let var_name1 = &captures[1];
         let var_name2 = &captures[2];
         let module_name = &captures[3];
         
-        // 检查两个变量名是否相同
         if var_name1 == var_name2 {
             // 注入策略：不依赖任何 bundle 标识符（u / class 名），内联 URLSearchParams 解析
             // fragment 提取 access_token，直接转交给实例方法 handleAuthToken。
@@ -286,16 +340,11 @@ pub async fn apply_seamless_patch_internal(
         }
     }
     
-    // 4. 应用修改2: 移除180秒超时限制
-    let pattern2_str = r#",new Promise\(\((\w+),(\w+)\)=>setTimeout\(\(\)=>\{(\w+)\(new (\w+)\)\},18e4\)\)"#;
-    let pattern2 = Regex::new(pattern2_str)
-        .map_err(|e| format!("正则表达式错误2: {}", e))?;
-    
+    // 6.2 移除 180 秒超时限制
     if let Some(captures) = pattern2.captures(&modified_content) {
-        let reject_var1 = &captures[2];  // 第二个参数
-        let reject_var2 = &captures[3];  // setTimeout中的变量
+        let reject_var1 = &captures[2];
+        let reject_var2 = &captures[3];
         
-        // 检查是否是同一个reject变量
         if reject_var1 == reject_var2 {
             let full_match = captures.get(0).unwrap().as_str();
             modified_content = modified_content.replace(full_match, "");
@@ -303,17 +352,24 @@ pub async fn apply_seamless_patch_internal(
         }
     }
     
-    // 5. 验证修改
-    if modified_content == content {
-        // 如果内容没有变化，说明已经打过补丁
-        return Ok(serde_json::json!({
-            "success": true,
-            "already_patched": true,
-            "message": "补丁已经应用过了"
-        }));
+    // 6.3 跳过切号确认对话框（"Are you sure you want to log in using a different account?"）
+    //     将 if 条件整体替换为 `if(true)`，body 仍是原来的 try{...}catch{...} 单语句，语法合法。
+    if let Some(captures) = pattern3.captures(&modified_content) {
+        let full_match = captures.get(0).unwrap().as_str();
+        let replacement = "if(true)";
+        modified_content = modified_content.replace(full_match, replacement);
+        modifications.push("跳过切号确认对话框");
     }
     
-    // 6. 写入修改后的文件
+    // 7. 二次校验：dry-run 判定需要改但 replacement 实际没改到任何东西，
+    //    说明 pattern 与 replacement 之间存在版本漂移（例如 var_name 校验未通过）。
+    //    回滚刚创建的备份，Fail-Fast 报错以便用户/开发者感知。
+    if modified_content == content {
+        let _ = fs::remove_file(&backup_file);
+        return Err("pattern 可匹配但替换后无变化，疑似 pattern/replacement 版本不匹配，请升级工具".to_string());
+    }
+    
+    // 8. 写入修改后的文件
     fs::write(&extension_file, &modified_content)
         .map_err(|e| format!("写入文件失败: {}", e))?;
     
@@ -437,6 +493,10 @@ fn find_latest_backup(extension_dir: &Path, saved_backup_path: &Option<String>) 
 }
 
 /// 检查补丁状态
+///
+/// 判定口径与 `apply_seamless_patch_internal` 保持一致：以"原始 pattern 是否还能匹配"
+/// 为主要依据，避免历史上两处使用不同标识字符串导致 UI 与磁盘实际状态脱节。
+/// 兼容第三方 / 旧版本工具打过的补丁：只要原始结构已被替换掉就视为"已安装"。
 #[command]
 pub async fn check_patch_status(
     windsurf_path: String,
@@ -453,14 +513,34 @@ pub async fn check_patch_status(
     let content = fs::read_to_string(&extension_file)
         .map_err(|e| format!("读取文件失败: {}", e))?;
     
-    // 检查是否包含补丁标识
-    let has_oauth_handler = content.contains("Failed to handle OAuth callback");
-    let has_timeout_removed = !content.contains("18e4");
+    let pattern1 = Regex::new(PATTERN_URI_HANDLER_ORIGINAL)
+        .map_err(|e| format!("正则表达式错误: {}", e))?;
+    let pattern2 = Regex::new(PATTERN_TIMEOUT_ORIGINAL)
+        .map_err(|e| format!("正则表达式错误2: {}", e))?;
+    let pattern3 = Regex::new(PATTERN_DIFF_ACCOUNT_PROMPT_ORIGINAL)
+        .map_err(|e| format!("正则表达式错误3: {}", e))?;
+    
+    // 原始 pattern 仍能匹配 = 对应结构原封未动；匹配不上 = 已被补丁改写
+    let pattern1_original_present = pattern1.is_match(&content);
+    let pattern2_original_present = pattern2.is_match(&content);
+    let pattern3_original_present = pattern3.is_match(&content);
+    
+    // 三条原始 pattern 都不再匹配 = 完整打过当前版本补丁
+    // 注：只打过 1+2 的旧补丁 installed=false，让前端同步开关并提示用户重新"启用"升级到完整补丁
+    let installed = !pattern1_original_present
+        && !pattern2_original_present
+        && !pattern3_original_present;
+    // 辅助标识：文件里是否含有当前版本注入代码的特征字符串，便于前端区分版本
+    let has_oauth_handler = content.contains(CURRENT_VERSION_MARKER);
+    let has_timeout_removed = !pattern2_original_present;
+    let prompt_bypass_applied = !pattern3_original_present;
     
     Ok(serde_json::json!({
-        "installed": has_oauth_handler,
+        "installed": installed,
+        "current_version": has_oauth_handler,
         "oauth_handler": has_oauth_handler,
-        "timeout_removed": has_timeout_removed
+        "timeout_removed": has_timeout_removed,
+        "prompt_bypass_applied": prompt_bypass_applied
     }))
 }
 
