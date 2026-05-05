@@ -1,9 +1,11 @@
 use crate::models::{Account, AppConfig, OperationLog};
+use crate::repository::sqlite_account_store::SqliteAccountStore;
 use crate::utils::{AppError, AppResult};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 use tauri::{Manager, Emitter};
 use chrono::Local;
@@ -22,7 +24,27 @@ pub struct DataStore {
     config_path: PathBuf,
     pub logs: Arc<RwLock<Vec<OperationLog>>>,
     logs_path: PathBuf,
+
+    // ========== Save Coalescer（写盘合并器，v1.7.8，与主端同步） ==========
+    //
+    // 用于批量场景的写盘合并：多个并发 `request_save_coalesced()` 调用会被汇聚
+    // 成 1~2 次实际 atomic_write，将批量导入/批量更新等场景的 IO 次数从 O(N) 降到 O(1~2)。
+    //
+    // 语义：
+    // - `request_save_coalesced()`：非阻塞，登记脏标记；第一个调用者 spawn worker，
+    //   后续调用直接返回（CAS 合并）。worker 抢到 lock 后清零脏标记并执行一次 save。
+    // - `flush_pending_saves()`：阻塞，抢占所有 lock 并检查脏标记，有脏就立即同步落盘。
+    //   仅用于 app exit hook，保证 crash 安全。
+    // - `save()` / `save_logs()`：语义不变，仍然是立即同步落盘，供需要强一致性的路径使用。
+    save_pending: Arc<AtomicBool>,
+    save_logs_pending: Arc<AtomicBool>,
+    save_coalesce_lock: Arc<Mutex<()>>,
+    save_logs_coalesce_lock: Arc<Mutex<()>>,
     app_handle: tauri::AppHandle,
+
+    /// **v1.7.8 方案 B SQLite 重构**：账号存储层。
+    /// 替代原 `AppConfig.accounts: Vec<Account>` + JSON 全量落盘。
+    pub account_store: Arc<SqliteAccountStore>,
 }
 
 impl DataStore {
@@ -52,12 +74,37 @@ impl DataStore {
             fs::write(&config_path, config_data)?;
         }
         
+        // **v1.7.8 方案 B**：初始化 SQLite 账号存储
+        let db_path = app_data_dir.join("accounts.db");
+        let account_store = Arc::new(SqliteAccountStore::open(&db_path)?);
+
+        // 自动迁移：accounts.json 中的账号 → SQLite（仅在 SQLite 为空且 JSON 有数据时执行）
+        if !config.accounts.is_empty() && account_store.count().unwrap_or(0) == 0 {
+            let migrated = config.accounts.len();
+            match account_store.bulk_insert(&config.accounts) {
+                Ok(count) => {
+                    println!("[DataStore] 迁移 accounts.json → SQLite: {}/{} 条成功", count, migrated);
+                    config.accounts.clear();
+                    let config_data = serde_json::to_string_pretty(&config)?;
+                    fs::write(&config_path, config_data)?;
+                }
+                Err(e) => {
+                    eprintln!("[DataStore] 迁移失败（数据仍在 accounts.json，下次启动重试）: {}", e);
+                }
+            }
+        }
+
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             config_path,
             logs: Arc::new(RwLock::new(logs)),
             logs_path,
+            save_pending: Arc::new(AtomicBool::new(false)),
+            save_logs_pending: Arc::new(AtomicBool::new(false)),
+            save_coalesce_lock: Arc::new(Mutex::new(())),
+            save_logs_coalesce_lock: Arc::new(Mutex::new(())),
             app_handle: app_handle.clone(),
+            account_store,
         })
     }
 
@@ -198,127 +245,148 @@ impl DataStore {
         Ok(())
     }
 
-    // 账号管理方法
-    pub async fn add_account(&self, email: String, password: String, nickname: String) -> AppResult<Account> {
-        let mut config = self.config.write().await;
-        
-        // 检查邮箱是否已存在
-        if config.accounts.iter().any(|a| a.email == email) {
-            return Err(AppError::Config(format!("Account with email {} already exists", email)));
+    // ========== Save Coalescer 实现（v1.7.8，与主端同步） ==========
+
+    /// 请求合并写盘（非阻塞）：多次并发调用会被 CAS 合并为最多 1~2 次实际 save。
+    ///
+    /// 批量场景（批量导入等）应调用此方法替代直接 `save()`。
+    /// 应用退出前必须调用 [`Self::flush_pending_saves`] 强制同步落盘。
+    pub fn request_save_coalesced(self: &Arc<Self>) {
+        // CAS 合并：旧值为 true 说明已有 pending save 排队，直接返回
+        if self.save_pending.swap(true, Ordering::AcqRel) {
+            return;
         }
-        
-        // 直接保存密码，不加密，初始化标签为空
-        let account = Account::new(email, password, nickname, Vec::new());
-        
-        config.accounts.push(account.clone());
-        drop(config); // 释放写锁
-        
-        self.save().await?;
-        Ok(account)
+
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(e) = this.do_coalesced_save_once().await {
+                eprintln!("[DataStore] coalesced save failed: {}", e);
+            }
+        });
     }
 
-    pub async fn get_account(&self, id: Uuid) -> AppResult<Account> {
-        let config = self.config.read().await;
-        config.accounts
-            .iter()
-            .find(|a| a.id == id)
-            .cloned()
-            .ok_or_else(|| AppError::AccountNotFound(id.to_string()))
-    }
-
-    pub async fn get_all_accounts(&self) -> AppResult<Vec<Account>> {
-        let config = self.config.read().await;
-        Ok(config.accounts.clone())
-    }
-
-    pub async fn update_account(&self, account: Account) -> AppResult<()> {
-        self.update_account_internal(account, true).await
-    }
-    
-    /// 更新账号信息，不立即保存（用于批量操作）
-    pub async fn update_account_no_save(&self, account: Account) -> AppResult<()> {
-        self.update_account_internal(account, false).await
-    }
-    
-    /// 内部方法：更新账号信息
-    async fn update_account_internal(&self, account: Account, save_immediately: bool) -> AppResult<()> {
-        let mut config = self.config.write().await;
-        
-        if let Some(existing) = config.accounts.iter_mut().find(|a| a.id == account.id) {
-            // 保存原有的密码（永远不通过这个方法更新密码）
-            let original_password = existing.password.clone();
-            
-            // Token直接保存，不加密
-            
-            // 更新账号信息
-            *existing = account;
-            
-            // 恢复原有密码（密码更新应该通过专门的update_account_password方法）
-            existing.password = original_password;
-        } else {
-            return Err(AppError::AccountNotFound(account.id.to_string()));
+    /// 请求合并写日志（非阻塞）：语义与 `request_save_coalesced` 一致，针对 logs.json。
+    pub fn request_save_logs_coalesced(self: &Arc<Self>) {
+        if self.save_logs_pending.swap(true, Ordering::AcqRel) {
+            return;
         }
-        
-        drop(config);
-        
-        if save_immediately {
+
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(e) = this.do_coalesced_save_logs_once().await {
+                eprintln!("[DataStore] coalesced save_logs failed: {}", e);
+            }
+        });
+    }
+
+    /// 原子执行一次合并 save：抢 lock → swap 清零脏标记 → 若脏则 save。
+    async fn do_coalesced_save_once(&self) -> AppResult<()> {
+        let _guard = self.save_coalesce_lock.lock().await;
+        if self.save_pending.swap(false, Ordering::AcqRel) {
             self.save().await?;
         }
         Ok(())
     }
 
+    async fn do_coalesced_save_logs_once(&self) -> AppResult<()> {
+        let _guard = self.save_logs_coalesce_lock.lock().await;
+        if self.save_logs_pending.swap(false, Ordering::AcqRel) {
+            self.save_logs().await?;
+        }
+        Ok(())
+    }
+
+    /// 阻塞 flush 所有 pending 的 coalesced save（config + logs），仅在 app exit hook 中调用。
+    pub async fn flush_pending_saves(&self) -> AppResult<()> {
+        self.do_coalesced_save_once().await?;
+        self.do_coalesced_save_logs_once().await?;
+        Ok(())
+    }
+
+    // ==================== 账号管理方法（v1.7.8 方案 B：全部委托 SQLite） ====================
+
+    pub async fn add_account(&self, email: String, password: String, nickname: String) -> AppResult<Account> {
+        self.add_account_no_save(email, password, nickname).await
+    }
+
+    pub async fn add_account_no_save(&self, email: String, password: String, nickname: String) -> AppResult<Account> {
+        if self.account_store.email_exists(&email)? {
+            return Err(AppError::Config(format!("Account with email {} already exists", email)));
+        }
+        let account = Account::new(email, password, nickname, Vec::new());
+        self.account_store.insert_account(&account)?;
+        Ok(account)
+    }
+
+    pub async fn get_account(&self, id: Uuid) -> AppResult<Account> {
+        self.account_store.get_account(&id)
+    }
+
+    pub async fn get_all_accounts(&self) -> AppResult<Vec<Account>> {
+        self.account_store.get_all_accounts()
+    }
+
+    pub async fn update_account(&self, account: Account) -> AppResult<()> {
+        self.update_account_internal(account, true).await
+    }
+
+    pub async fn update_account_no_save(&self, account: Account) -> AppResult<()> {
+        self.update_account_internal(account, false).await
+    }
+
+    async fn update_account_internal(&self, mut account: Account, _save_immediately: bool) -> AppResult<()> {
+        if let Ok(existing) = self.account_store.get_account(&account.id) {
+            account.password = existing.password;
+        }
+        self.account_store.upsert_account(&account)?;
+        Ok(())
+    }
+
     pub async fn delete_account(&self, id: Uuid) -> AppResult<()> {
-        let mut config = self.config.write().await;
-        
-        let initial_len = config.accounts.len();
-        config.accounts.retain(|a| a.id != id);
-        
-        if config.accounts.len() == initial_len {
+        if !self.account_store.delete_account(&id)? {
             return Err(AppError::AccountNotFound(id.to_string()));
         }
-        
-        drop(config);
-        
-        // 同时删除相关日志
         let mut logs = self.logs.write().await;
         logs.retain(|log| log.account_id != Some(id));
         drop(logs);
-        
-        self.save().await?;
         self.save_logs().await?;
         Ok(())
     }
 
-    pub async fn update_account_password(&self, id: Uuid, new_password: String) -> AppResult<()> {
-        let mut config = self.config.write().await;
-        
-        if let Some(account) = config.accounts.iter_mut().find(|a| a.id == id) {
-            // 直接保存新密码，不加密
-            account.password = new_password;
-        } else {
-            return Err(AppError::AccountNotFound(id.to_string()));
+    pub async fn delete_accounts_batch(
+        &self,
+        ids: &[Uuid],
+    ) -> AppResult<(Vec<Uuid>, Vec<Uuid>)> {
+        if ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
         }
-        
-        drop(config);
-        self.save().await?;
+        let deleted_ids = self.account_store.delete_accounts_batch(ids)?;
+        let deleted_set: std::collections::HashSet<Uuid> = deleted_ids.iter().copied().collect();
+        let not_found_ids: Vec<Uuid> = ids.iter().filter(|id| !deleted_set.contains(id)).copied().collect();
+
+        if !deleted_ids.is_empty() {
+            let mut logs = self.logs.write().await;
+            logs.retain(|log| log.account_id.map(|aid| !deleted_set.contains(&aid)).unwrap_or(true));
+            drop(logs);
+            self.save_logs().await?;
+        }
+        Ok((deleted_ids, not_found_ids))
+    }
+
+    pub async fn update_account_password(&self, id: Uuid, new_password: String) -> AppResult<()> {
+        let mut account = self.account_store.get_account(&id)?;
+        account.password = new_password;
+        self.account_store.upsert_account(&account)?;
         Ok(())
     }
-    
+
     pub async fn update_account_token(&self, id: Uuid, token: String, expires_at: chrono::DateTime<chrono::Utc>) -> AppResult<()> {
-        let mut config = self.config.write().await;
-        
-        if let Some(account) = config.accounts.iter_mut().find(|a| a.id == id) {
-            // 直接保存Token，不加密
-            account.token = Some(token);
-            account.token_expires_at = Some(expires_at);
-            account.last_login_at = Some(chrono::Utc::now());
-            account.status = crate::models::AccountStatus::Active;
-        } else {
-            return Err(AppError::AccountNotFound(id.to_string()));
-        }
-        
-        drop(config);
-        self.save().await?;
+        let mut account = self.account_store.get_account(&id)?;
+        account.token = Some(token);
+        account.token_expires_at = Some(expires_at);
+        account.last_login_at = Some(chrono::Utc::now());
+        account.status = crate::models::AccountStatus::Active;
+        self.account_store.upsert_account(&account)?;
         Ok(())
     }
     
@@ -332,31 +400,18 @@ impl DataStore {
         self.update_account_tokens_internal(id, token, refresh_token, expires_at, false).await
     }
     
-    /// 内部方法：更新账号 token
-    async fn update_account_tokens_internal(&self, id: Uuid, token: String, refresh_token: String, expires_at: chrono::DateTime<chrono::Utc>, save_immediately: bool) -> AppResult<()> {
-        // 保存 token 副本用于事件发送
+    /// 内部方法：更新账号 token（v1.7.8 方案 B：委托 SQLite）
+    async fn update_account_tokens_internal(&self, id: Uuid, token: String, refresh_token: String, expires_at: chrono::DateTime<chrono::Utc>, _save_immediately: bool) -> AppResult<()> {
         let token_for_event = token.clone();
-        
-        let mut config = self.config.write().await;
-        
-        if let Some(account) = config.accounts.iter_mut().find(|a| a.id == id) {
-            // 保存两种token
-            account.token = Some(token);
-            account.refresh_token = Some(refresh_token);
-            account.token_expires_at = Some(expires_at);
-            account.last_login_at = Some(chrono::Utc::now());
-            account.status = crate::models::AccountStatus::Active;
-        } else {
-            return Err(AppError::AccountNotFound(id.to_string()));
-        }
-        
-        drop(config);
-        
-        if save_immediately {
-            self.save().await?;
-        }
-        
-        // 发送事件通知前端 token 已刷新
+
+        let mut account = self.account_store.get_account(&id)?;
+        account.token = Some(token);
+        account.refresh_token = Some(refresh_token);
+        account.token_expires_at = Some(expires_at);
+        account.last_login_at = Some(chrono::Utc::now());
+        account.status = crate::models::AccountStatus::Active;
+        self.account_store.upsert_account(&account)?;
+
         let payload = TokenRefreshedPayload {
             account_id: id.to_string(),
             token: token_for_event,
@@ -365,7 +420,7 @@ impl DataStore {
         if let Err(e) = self.app_handle.emit("token-refreshed", payload) {
             println!("[DataStore] Failed to emit token-refreshed event: {}", e);
         }
-        
+
         Ok(())
     }
     
@@ -375,26 +430,12 @@ impl DataStore {
     }
 
     pub async fn get_decrypted_password(&self, id: Uuid) -> AppResult<String> {
-        let config = self.config.read().await;
-        
-        let account = config.accounts
-            .iter()
-            .find(|a| a.id == id)
-            .ok_or_else(|| AppError::AccountNotFound(id.to_string()))?;
-        
-        // 直接返回密码，因为已经是明文
+        let account = self.account_store.get_account(&id)?;
         Ok(account.password.clone())
     }
 
     pub async fn get_decrypted_token(&self, id: Uuid) -> AppResult<Option<String>> {
-        let config = self.config.read().await;
-        
-        let account = config.accounts
-            .iter()
-            .find(|a| a.id == id)
-            .ok_or_else(|| AppError::AccountNotFound(id.to_string()))?;
-        
-        // 直接返回Token，因为已经是明文
+        let account = self.account_store.get_account(&id)?;
         Ok(account.token.clone())
     }
 
@@ -413,45 +454,26 @@ impl DataStore {
 
     pub async fn delete_group(&self, name: String) -> AppResult<()> {
         let mut config = self.config.write().await;
-        
         config.groups.retain(|g| g != &name);
-        
-        // 移除账号中的分组引用
-        for account in &mut config.accounts {
-            if account.group == Some(name.clone()) {
-                account.group = None;
-            }
-        }
-        
         drop(config);
         self.save().await?;
+        let _ = self.account_store.update_group_for_all(&name, None);
         Ok(())
     }
-    
+
     pub async fn rename_group(&self, old_name: String, new_name: String) -> AppResult<()> {
         let mut config = self.config.write().await;
-        
-        // 检查新名称是否已存在
         if config.groups.contains(&new_name) {
             return Err(AppError::Config(format!("Group '{}' already exists", new_name)));
         }
-        
-        // 查找并重命名分组
         if let Some(index) = config.groups.iter().position(|g| g == &old_name) {
             config.groups[index] = new_name.clone();
-            
-            // 更新账号中的分组引用
-            for account in &mut config.accounts {
-                if account.group == Some(old_name.clone()) {
-                    account.group = Some(new_name.clone());
-                }
-            }
         } else {
             return Err(AppError::Config(format!("Group '{}' not found", old_name)));
         }
-        
         drop(config);
         self.save().await?;
+        let _ = self.account_store.update_group_for_all(&old_name, Some(&new_name));
         Ok(())
     }
 
@@ -482,54 +504,28 @@ impl DataStore {
 
     pub async fn update_tag(&self, old_name: String, tag: crate::models::GlobalTag) -> AppResult<()> {
         let mut config = self.config.write().await;
-        
-        // 如果名称改变，检查新名称是否已存在
         if old_name != tag.name && config.tags.iter().any(|t| t.name == tag.name) {
             return Err(AppError::Config(format!("Tag '{}' already exists", tag.name)));
         }
-        
-        // 查找并更新标签
         if let Some(index) = config.tags.iter().position(|t| t.name == old_name) {
-            // 如果名称改变，更新账号中的标签引用和颜色
-            if old_name != tag.name {
-                for account in &mut config.accounts {
-                    // 更新标签名称
-                    if let Some(tag_index) = account.tags.iter().position(|t| t == &old_name) {
-                        account.tags[tag_index] = tag.name.clone();
-                    }
-                    // 更新标签颜色
-                    if let Some(color_index) = account.tag_colors.iter().position(|tc| tc.name == old_name) {
-                        account.tag_colors[color_index].name = tag.name.clone();
-                        account.tag_colors[color_index].color = tag.color.clone();
-                    }
-                }
-            } else {
-                // 只更新颜色，同步更新所有账号的默认颜色（如果账号没有自定义颜色）
-                // 这里我们不强制覆盖账号的自定义颜色
-            }
-            config.tags[index] = tag;
+            config.tags[index] = tag.clone();
         } else {
             return Err(AppError::Config(format!("Tag '{}' not found", old_name)));
         }
-        
         drop(config);
         self.save().await?;
+        if old_name != tag.name {
+            let _ = self.account_store.rename_tag_for_all(&old_name, &tag.name);
+        }
         Ok(())
     }
 
     pub async fn delete_tag(&self, name: String) -> AppResult<()> {
         let mut config = self.config.write().await;
-        
         config.tags.retain(|t| t.name != name);
-        
-        // 移除账号中的标签引用
-        for account in &mut config.accounts {
-            account.tags.retain(|t| t != &name);
-            account.tag_colors.retain(|tc| tc.name != name);
-        }
-        
         drop(config);
         self.save().await?;
+        let _ = self.account_store.remove_tag_for_all(&name);
         Ok(())
     }
 
@@ -539,21 +535,19 @@ impl DataStore {
         add_tags: Vec<String>,
         remove_tags: Vec<String>,
     ) -> AppResult<(usize, usize)> {
-        let mut config = self.config.write().await;
+        let config = self.config.read().await;
+        let global_tags = config.tags.clone();
+        drop(config);
+
         let mut success_count = 0;
         let mut failed_count = 0;
-        
-        // 先克隆全局标签，避免借用冲突
-        let global_tags = config.tags.clone();
-        
+
         for id in account_ids {
             if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
-                if let Some(account) = config.accounts.iter_mut().find(|a| a.id == uuid) {
-                    // 添加标签
+                if let Ok(mut account) = self.account_store.get_account(&uuid) {
                     for tag_name in &add_tags {
                         if !account.tags.contains(tag_name) {
                             account.tags.push(tag_name.clone());
-                            // 如果全局标签有默认颜色，添加到账号
                             if let Some(global_tag) = global_tags.iter().find(|t| &t.name == tag_name) {
                                 if !account.tag_colors.iter().any(|tc| &tc.name == tag_name) {
                                     account.tag_colors.push(crate::models::TagWithColor {
@@ -564,12 +558,15 @@ impl DataStore {
                             }
                         }
                     }
-                    // 移除标签
                     for tag_name in &remove_tags {
                         account.tags.retain(|t| t != tag_name);
                         account.tag_colors.retain(|tc| &tc.name != tag_name);
                     }
-                    success_count += 1;
+                    if self.account_store.upsert_account(&account).is_ok() {
+                        success_count += 1;
+                    } else {
+                        failed_count += 1;
+                    }
                 } else {
                     failed_count += 1;
                 }
@@ -577,9 +574,6 @@ impl DataStore {
                 failed_count += 1;
             }
         }
-        
-        drop(config);
-        self.save().await?;
         Ok((success_count, failed_count))
     }
 
@@ -636,52 +630,71 @@ impl DataStore {
     
     // ==================== 数据安全功能 ====================
     
-    /// 创建带时间戳的备份
+    /// 创建带时间戳的备份（备份整个数据目录下的所有JSON文件）
     pub async fn create_timestamped_backup(&self) -> AppResult<PathBuf> {
         let config = self.config.read().await;
-        let data = serde_json::to_string_pretty(&*config)?;
+        let max_count = config.settings.backup_max_count as usize;
         drop(config);
         
         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-        let backup_dir = self.config_path.parent()
-            .ok_or_else(|| AppError::Config("Invalid config path".to_string()))?
-            .join("backups");
+        let data_dir = self.config_path.parent()
+            .ok_or_else(|| AppError::Config("Invalid config path".to_string()))?;
+        let backup_root = data_dir.join("backups");
         
-        // 确保备份目录存在
-        fs::create_dir_all(&backup_dir)?;
+        // 创建以时间戳命名的备份子目录
+        let backup_subdir = backup_root.join(format!("backup_{}", timestamp));
+        fs::create_dir_all(&backup_subdir)?;
         
-        let backup_path = backup_dir.join(format!("accounts_{}.json", timestamp));
-        fs::write(&backup_path, data)?;
+        // 备份数据目录下的所有数据文件（v1.7.8 方案 B：增加 accounts.db SQLite 数据库）
+        let data_files = ["accounts.json", "logs.json", "auto_reset_configs.json", "reset_records.json", "success_bins.json", "accounts.db"];
+        let mut backed_up_count = 0;
         
-        // 清理旧备份，只保留最近10个
-        Self::cleanup_old_backups(&backup_dir, 10)?;
+        for file_name in &data_files {
+            let src_path = data_dir.join(file_name);
+            if src_path.exists() {
+                let dest_path = backup_subdir.join(file_name);
+                fs::copy(&src_path, &dest_path)?;
+                backed_up_count += 1;
+            }
+        }
         
-        Ok(backup_path)
+        // 清理旧备份目录，使用配置的最大备份数
+        Self::cleanup_old_backup_dirs(&backup_root, max_count)?;
+        
+        println!("[Backup] 备份创建成功: {:?}, 共 {} 个文件, 最大保留 {} 份", 
+            backup_subdir.file_name(), backed_up_count, max_count);
+        
+        Ok(backup_subdir)
     }
     
-    /// 清理旧备份文件，只保留最近 N 个
-    fn cleanup_old_backups(backup_dir: &PathBuf, keep_count: usize) -> std::io::Result<()> {
-        let mut backup_files: Vec<_> = fs::read_dir(backup_dir)?
+    /// 清理旧备份目录，只保留最近 N 个
+    fn cleanup_old_backup_dirs(backup_root: &PathBuf, keep_count: usize) -> std::io::Result<()> {
+        if !backup_root.exists() {
+            return Ok(());
+        }
+        
+        let mut backup_dirs: Vec<_> = fs::read_dir(backup_root)?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter(|path| {
-                path.file_name()
+                path.is_dir() && path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("accounts_") && name.ends_with(".json"))
+                    .map(|name| name.starts_with("backup_"))
                     .unwrap_or(false)
             })
             .collect();
         
         // 按修改时间排序（最新的在前）
-        backup_files.sort_by(|a, b| {
+        backup_dirs.sort_by(|a, b| {
             let time_a = fs::metadata(a).and_then(|m| m.modified()).ok();
             let time_b = fs::metadata(b).and_then(|m| m.modified()).ok();
             time_b.cmp(&time_a)
         });
         
-        // 删除超出数量的旧备份
-        for old_backup in backup_files.iter().skip(keep_count) {
-            let _ = fs::remove_file(old_backup);
+        // 删除超出数量的旧备份目录
+        for old_backup in backup_dirs.iter().skip(keep_count) {
+            let _ = fs::remove_dir_all(old_backup);
+            println!("[Backup] 已删除旧备份: {:?}", old_backup.file_name());
         }
         
         Ok(())
@@ -689,14 +702,16 @@ impl DataStore {
     
     /// 导出数据到指定路径
     pub async fn export_data(&self, export_path: &PathBuf) -> AppResult<()> {
+        let accounts = self.account_store.get_all_accounts()?;
         let config = self.config.read().await;
         let export_data = serde_json::json!({
             "version": "1.0",
             "exported_at": Local::now().to_rfc3339(),
-            "accounts": config.accounts,
+            "accounts": accounts,
             "groups": config.groups,
             "settings": config.settings
         });
+        drop(config);
         
         let data = serde_json::to_string_pretty(&export_data)?;
         fs::write(export_path, data)?;
@@ -709,35 +724,38 @@ impl DataStore {
         let data = fs::read_to_string(import_path)?;
         let import_data: serde_json::Value = serde_json::from_str(&data)?;
         
-        // 先创建当前数据的备份
         self.create_timestamped_backup().await?;
         
-        let mut config = self.config.write().await;
         let mut result = ImportResult::default();
         
-        // 导入账号
+        // v1.7.8 方案 B：导入账号到 SQLite
         if let Some(accounts) = import_data.get("accounts") {
             let imported_accounts: Vec<Account> = serde_json::from_value(accounts.clone())?;
             
             if merge {
-                // 合并模式：只添加不存在的账号
                 for account in imported_accounts {
-                    if !config.accounts.iter().any(|a| a.email == account.email) {
-                        config.accounts.push(account);
-                        result.accounts_added += 1;
+                    if !self.account_store.email_exists(&account.email).unwrap_or(true) {
+                        if self.account_store.insert_account(&account).is_ok() {
+                            result.accounts_added += 1;
+                        } else {
+                            result.accounts_skipped += 1;
+                        }
                     } else {
                         result.accounts_skipped += 1;
                     }
                 }
             } else {
-                // 替换模式：完全替换
+                if let Ok(existing) = self.account_store.get_all_accounts() {
+                    let ids: Vec<Uuid> = existing.iter().map(|a| a.id).collect();
+                    let _ = self.account_store.delete_accounts_batch(&ids);
+                }
                 result.accounts_added = imported_accounts.len();
-                config.accounts = imported_accounts;
+                let _ = self.account_store.bulk_insert(&imported_accounts);
             }
         }
         
-        // 导入分组
         if let Some(groups) = import_data.get("groups") {
+            let mut config = self.config.write().await;
             let imported_groups: Vec<String> = serde_json::from_value(groups.clone())?;
             for group in imported_groups {
                 if !config.groups.contains(&group) {
@@ -745,35 +763,37 @@ impl DataStore {
                     result.groups_added += 1;
                 }
             }
+            drop(config);
+            self.save().await?;
         }
-        
-        drop(config);
-        self.save().await?;
         
         Ok(result)
     }
     
-    /// 获取备份列表
+    /// 获取备份列表（返回备份目录列表）
     pub async fn list_backups(&self) -> AppResult<Vec<BackupInfo>> {
-        let backup_dir = self.config_path.parent()
+        let backup_root = self.config_path.parent()
             .ok_or_else(|| AppError::Config("Invalid config path".to_string()))?
             .join("backups");
         
-        if !backup_dir.exists() {
+        if !backup_root.exists() {
             return Ok(Vec::new());
         }
         
-        let mut backups: Vec<BackupInfo> = fs::read_dir(&backup_dir)?
+        let mut backups: Vec<BackupInfo> = fs::read_dir(&backup_root)?
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| {
                 let path = entry.path();
                 let name = path.file_name()?.to_str()?.to_string();
-                if name.starts_with("accounts_") && name.ends_with(".json") {
+                // 匹配备份目录 backup_YYYYMMDD_HHMMSS
+                if path.is_dir() && name.starts_with("backup_") {
                     let metadata = fs::metadata(&path).ok()?;
+                    // 计算目录总大小
+                    let total_size = Self::calculate_dir_size(&path);
                     Some(BackupInfo {
                         name,
                         path: path.to_string_lossy().to_string(),
-                        size: metadata.len(),
+                        size: total_size,
                         created_at: metadata.modified().ok()
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs() as i64),
@@ -790,45 +810,71 @@ impl DataStore {
         Ok(backups)
     }
     
-    /// 从备份恢复
+    /// 计算目录大小
+    fn calculate_dir_size(path: &PathBuf) -> u64 {
+        fs::read_dir(path)
+            .map(|entries| {
+                entries.filter_map(|e| e.ok())
+                    .filter_map(|e| fs::metadata(e.path()).ok())
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+    
+    /// 从备份目录恢复所有数据
     pub async fn restore_from_backup(&self, backup_path: &PathBuf) -> AppResult<()> {
-        let data = fs::read_to_string(backup_path)?;
-        
-        // 验证备份数据
-        let config: AppConfig = serde_json::from_str(&data)?;
+        let data_dir = self.config_path.parent()
+            .ok_or_else(|| AppError::Config("Invalid config path".to_string()))?;
         
         // 先备份当前数据
         self.create_timestamped_backup().await?;
         
-        // 恢复数据
-        let mut current_config = self.config.write().await;
-        *current_config = config;
-        drop(current_config);
+        // 从备份目录恢复所有文件（v1.7.8 方案 B：增加 accounts.db SQLite 数据库）
+        let data_files = ["accounts.json", "logs.json", "auto_reset_configs.json", "reset_records.json", "success_bins.json", "accounts.db"];
         
-        self.save().await?;
+        for file_name in &data_files {
+            let src_path = backup_path.join(file_name);
+            let dest_path = data_dir.join(file_name);
+            if src_path.exists() {
+                fs::copy(&src_path, &dest_path)?;
+                println!("[Backup] 已恢复: {}", file_name);
+            }
+        }
+        
+        // 重新加载 accounts.json 到内存
+        let accounts_path = data_dir.join("accounts.json");
+        if accounts_path.exists() {
+            let data = fs::read_to_string(&accounts_path)?;
+            let config: AppConfig = serde_json::from_str(&data)?;
+            let mut current_config = self.config.write().await;
+            *current_config = config;
+            drop(current_config);
+        }
         
         Ok(())
     }
     
     /// 删除指定备份
     pub async fn delete_backup(&self, backup_name: &str) -> AppResult<()> {
-        let backup_dir = self.config_path.parent()
+        let backup_root = self.config_path.parent()
             .ok_or_else(|| AppError::Config("Invalid config path".to_string()))?
             .join("backups");
         
-        let backup_path = backup_dir.join(backup_name);
+        let backup_path = backup_root.join(backup_name);
         
         // 安全检查：确保备份路径在备份目录下
-        if !backup_path.starts_with(&backup_dir) {
+        if !backup_path.starts_with(&backup_root) {
             return Err(AppError::Config("Invalid backup path".to_string()));
         }
         
-        // 确保是文件且以 accounts_ 开头且以 .json 结尾
-        if !backup_path.is_file() || !backup_name.starts_with("accounts_") || !backup_name.ends_with(".json") {
-            return Err(AppError::Config("Invalid backup file".to_string()));
+        // 确保是目录且以backup_开头
+        if !backup_path.is_dir() || !backup_name.starts_with("backup_") {
+            return Err(AppError::Config("Invalid backup".to_string()));
         }
         
-        fs::remove_file(&backup_path)?;
+        // 删除备份目录
+        fs::remove_dir_all(&backup_path)?;
         println!("[Backup] 已删除备份: {}", backup_name);
         
         Ok(())
@@ -843,19 +889,14 @@ impl DataStore {
     
     /// 更新账户排序顺序（用于拖拽排序）
     pub async fn update_accounts_order(&self, account_ids: Vec<String>) -> AppResult<()> {
-        let mut config = self.config.write().await;
-        
-        // 为每个账户设置新的 sort_order
         for (index, id_str) in account_ids.iter().enumerate() {
             if let Ok(uuid) = Uuid::parse_str(id_str) {
-                if let Some(account) = config.accounts.iter_mut().find(|a| a.id == uuid) {
+                if let Ok(mut account) = self.account_store.get_account(&uuid) {
                     account.sort_order = index as i32;
+                    let _ = self.account_store.upsert_account(&account);
                 }
             }
         }
-        
-        drop(config);
-        self.save().await?;
         Ok(())
     }
     
@@ -863,8 +904,7 @@ impl DataStore {
     pub async fn get_sorted_accounts(&self, sort_field: &crate::models::SortField, sort_direction: &crate::models::SortDirection) -> AppResult<Vec<Account>> {
         use crate::models::{SortField, SortDirection};
         
-        let config = self.config.read().await;
-        let mut accounts = config.accounts.clone();
+        let mut accounts = self.account_store.get_all_accounts()?;
         
         // 根据排序字段排序
         match sort_field {

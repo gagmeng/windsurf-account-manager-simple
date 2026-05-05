@@ -105,12 +105,18 @@
           </span>
           <span v-else-if="importMode === 'password' && authProvider === 'smart'">
             [智能识别] 每行一个账号，格式：<code>邮箱 密码 备注(可选)</code>。
-            系统对每行并发嗅探 <strong>Firebase</strong> / <strong>Devin Auth1</strong> 并自动分派；
-            SSO / 未设密码 / 未注册的账号会归入导入失败。
+            系统对每行并发三路嗅探 <strong>Firebase</strong> / <strong>Devin（Windsurf 桥接）</strong> /
+            <strong>Devin 原生</strong>（app.devin.ai）并自动分派；
+            SSO / 未设密码 / 未注册 / Devin 原生无密账号会归入导入失败。
           </span>
           <span v-else-if="importMode === 'password' && authProvider === 'devin'">
             [Devin] 每行一个账号，格式：<code>邮箱 密码 备注(可选)</code>。
-            多组织账号将自动选择首个组织完成导入。
+            全部走 <strong>Windsurf 桥接侧</strong>，多组织账号将自动选择首个组织完成导入。
+          </span>
+          <span v-else-if="importMode === 'password' && authProvider === 'devin_native'">
+            [Devin 原生] 每行一个账号，格式：<code>邮箱 密码 备注(可选)</code>。
+            全部走 <strong>app.devin.ai 原生侧</strong>（省掉 sniff 探测开销），适用于已确认
+            整批账号都是纯 Devin 原生注册的场景；多组织将自动选择首个组织完成导入。
           </span>
           <span v-else-if="importMode === 'password'">
             每行一个账号，支持空格或连字符分隔：
@@ -301,7 +307,8 @@ const emit = defineEmits<{
     group: string,
     tags: string[],
     mode: 'password' | 'refresh_token' | 'devin_session_token' | 'devin_auth1_token',
-    authProvider: 'firebase' | 'devin' | 'smart',
+    // v1.7.6：新增 `'devin_native'` 手动模式，强制走 app.devin.ai/api/auth1/password/login
+    authProvider: 'firebase' | 'devin' | 'devin_native' | 'smart',
   ): void;
 }>();
 
@@ -322,32 +329,40 @@ const selectedGroup = ref<string>('');
 const selectedTags = ref<string[]>([]);
 const importMode = ref<'password' | 'refresh_token' | 'devin_session_token' | 'devin_auth1_token'>('password');
 /// 认证流派：
-/// - `smart`（默认，推荐）：逐行嗅探 Firebase / Devin 自动分派到对应命令
-/// - `firebase`：手动强制走原有 add_account + login_account
-/// - `devin`：手动强制走 add_account_by_devin_login，多组织自动选 orgs[0]
-const authProvider = ref<'firebase' | 'devin' | 'smart'>('smart');
+/// - `smart`（默认，推荐）：逐行并发三路嗅探 Firebase / Devin / Devin 原生自动分派
+/// - `firebase`：手动强制走原有 add_account + login_account（Firebase 体系）
+/// - `devin`：手动强制走 add_account_by_devin_login（Windsurf 桥接侧）
+/// - `devin_native`（v1.7.6 新增）：手动强制走 add_account_by_devin_native_login
+///   （app.devin.ai/api/auth1 原生侧），适用于已知全部是纯 Devin 原生账号、
+///   想省掉 sniff 开销的批量导入场景
+const authProvider = ref<'firebase' | 'devin' | 'devin_native' | 'smart'>('smart');
 
-// 切到 Devin / smart 后，Refresh Token 模式不适用（smart 模式因 Token 无 email 无法嗅探）
+// 切到 Devin / Devin 原生 / smart 后，Refresh Token 模式不适用
+// （smart 因 Token 无 email 无法嗅探；Devin / Devin 原生 均为 Auth1 体系，不使用 refresh_token）
 // 自动回落到邮箱密码模式并清空输入
 watch(authProvider, (val) => {
-  if ((val === 'devin' || val === 'smart') && importMode.value === 'refresh_token') {
+  if (
+    (val === 'devin' || val === 'devin_native' || val === 'smart') &&
+    importMode.value === 'refresh_token'
+  ) {
     importMode.value = 'password';
     handleModeChange();
   }
 });
 
 /**
- * 认证流派卡片选项（3 项固定）
+ * 认证流派卡片选项（v1.7.6 扩充 4 项固定）
  *
- * - smart：推荐流派，逐行嗅探自动分派
+ * - smart：推荐流派，逐行三路嗅探自动分派
  * - firebase：强制走传统 Firebase 体系
- * - devin：强制走 Devin Session 新体系
+ * - devin：强制走 Windsurf 桥接侧 Devin Session
+ * - devin_native：强制走 app.devin.ai 原生侧（节省 sniff 开销的批量迁 Devin 原生专用）
  */
 const authProviderOptions = [
   {
     value: 'smart' as const,
     title: '智能识别',
-    desc: '逐行并发嗅探 Firebase / Devin，自动分派到对应模式',
+    desc: '逐行并发三路嗅探 Firebase / Devin / Devin 原生，自动分派到对应命令',
     icon: MagicStick,
     tag: '推荐',
     tagType: 'primary' as const,
@@ -363,7 +378,15 @@ const authProviderOptions = [
   {
     value: 'devin' as const,
     title: 'Devin（新版）',
-    desc: '强制走 add_account_by_devin_login，多组织自动选 orgs[0]',
+    desc: '强制走 add_account_by_devin_login（Windsurf 桥接侧），多组织自动选 orgs[0]',
+    icon: User,
+    tag: '新',
+    tagType: 'success' as const,
+  },
+  {
+    value: 'devin_native' as const,
+    title: 'Devin 原生',
+    desc: '强制走 add_account_by_devin_native_login（app.devin.ai/api/auth1），多组织自动选 orgs[0]',
     icon: User,
     tag: '新',
     tagType: 'success' as const,
@@ -396,9 +419,12 @@ const importModeOptions = computed(() => [
     icon: Refresh,
     tag: '',
     tagType: 'info' as const,
-    disabled: authProvider.value === 'devin' || authProvider.value === 'smart',
+    disabled:
+      authProvider.value === 'devin' ||
+      authProvider.value === 'devin_native' ||
+      authProvider.value === 'smart',
     disabledReason:
-      authProvider.value === 'devin'
+      authProvider.value === 'devin' || authProvider.value === 'devin_native'
         ? 'Devin 体系不适用 refresh_token'
         : authProvider.value === 'smart'
           ? '智能识别需要 email，Token 格式无法嗅探'
@@ -430,7 +456,7 @@ const importModeOptions = computed(() => [
  * 切换认证流派：等价原 v-model="authProvider"。
  * 保留同值点击早返以避免触发 watch 側效应。
  */
-function selectAuthProvider(value: 'smart' | 'firebase' | 'devin') {
+function selectAuthProvider(value: 'smart' | 'firebase' | 'devin' | 'devin_native') {
   if (authProvider.value === value) return;
   authProvider.value = value;
 }

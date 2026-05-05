@@ -621,6 +621,9 @@ function getTagStyle(tagName: string): Record<string, string> {
   // 如果没有找到颜色，返回默认样式（而不是空对象）
   if (!color) {
     return {
+      '--account-tag-bg': 'rgba(64, 158, 255, 0.1)',
+      '--account-tag-border': 'rgba(64, 158, 255, 0.3)',
+      '--account-tag-color': 'rgba(64, 158, 255, 1)',
       backgroundColor: 'rgba(64, 158, 255, 0.1)',
       borderColor: 'rgba(64, 158, 255, 0.3)',
       color: 'rgba(64, 158, 255, 1)',
@@ -635,16 +638,25 @@ function getTagStyle(tagName: string): Record<string, string> {
     const bgAlpha = Math.min(a * 0.2, 0.3);
     // 边框使用稍高透明度
     const borderAlpha = Math.min(a * 0.5, 0.6);
+    const tagBackground = `rgba(${r}, ${g}, ${b}, ${bgAlpha})`;
+    const tagBorder = `rgba(${r}, ${g}, ${b}, ${borderAlpha})`;
+    const tagColor = `rgba(${r}, ${g}, ${b}, ${Math.max(a, 0.8)})`;
     return {
-      backgroundColor: `rgba(${r}, ${g}, ${b}, ${bgAlpha})`,
-      borderColor: `rgba(${r}, ${g}, ${b}, ${borderAlpha})`,
-      color: `rgba(${r}, ${g}, ${b}, ${Math.max(a, 0.8)})`,
-      border: `1px solid rgba(${r}, ${g}, ${b}, ${borderAlpha})`
+      '--account-tag-bg': tagBackground,
+      '--account-tag-border': tagBorder,
+      '--account-tag-color': tagColor,
+      backgroundColor: tagBackground,
+      borderColor: tagBorder,
+      color: tagColor,
+      border: `1px solid ${tagBorder}`
     };
   }
   
   // 如果颜色解析失败，尝试直接使用颜色值
   return {
+    '--account-tag-bg': color,
+    '--account-tag-border': color,
+    '--account-tag-color': '#fff',
     backgroundColor: color,
     borderColor: color,
     color: '#fff'
@@ -1623,22 +1635,12 @@ async function handleTurnstileSuccess(turnstileToken: string) {
     
     // 如果启用了自动打开，使用增强的API
     if (autoOpen) {
-      // 从store中获取最新的账号数据，确保token是最新的
-      const latestAccount = accountsStore.accounts.find(a => a.id === props.account.id);
-      const account = latestAccount || props.account;
-      
-      if (!account.token) {
-        ElMessage.warning('请先刷新Token后再试');
-        isGettingTrialLink.value = false;
-        return;
-      }
-      
-      // 使用增强的支付API
+      // 使用增强的支付 API（后端自行获取 token + 构造正确 AuthContext，支持 Firebase/Devin）
       const { getTrialPaymentLink, autoFillPaymentForm } = await import('@/utils/cardGenerator');
       
       const result = await getTrialPaymentLink(
-        account.nickname || account.email,
-        account.token,
+        props.account.id,
+        props.account.nickname || props.account.email,
         true, // 自动打开窗口
         teamsTier,
         paymentPeriod,
@@ -1805,16 +1807,9 @@ async function handleCheckProTrial() {
 
   isCheckingProTrial.value = true;
   try {
-    // Step 1: 强制拿到经过 ensure_valid_token 刷新后的有效 token
-    const tokenResult = await invoke('get_account_valid_token', { id: props.account.id }) as any;
-    if (!tokenResult?.success || !tokenResult?.token) {
-      ElMessage.error('Token 已失效且无法刷新，请重新登录账号后再试');
-      return;
-    }
-
-    // Step 2: 用新 token 请求后端
+    // 后端自行获取 token + 构造正确 AuthContext（支持 Firebase/Devin）
     const result = await invoke('check_pro_trial_eligibility', {
-      authToken: tokenResult.token
+      id: props.account.id
     }) as any;
 
     if (result.success) {

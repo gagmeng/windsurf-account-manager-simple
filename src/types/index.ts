@@ -226,12 +226,14 @@ export interface CheckUserLoginMethodResult {
 /**
  * 登录流派嗅探推荐值
  *
- * - `"firebase"`    — 老 Firebase 账号 + 已设密码，走 Firebase 邮箱密码登录
- * - `"devin"`       — 已迁移或新 Auth1 账号，走 Devin 账密登录
- * - `"sso"`         — 挂接企业 SSO，必须在浏览器中完成 SSO 跳转
- * - `"no_password"` — 老账号仅用过 Google/GitHub，需用 OAuth 或先重置密码
- * - `"not_found"`   — 邮箱两侧都不存在，需先注册
- * - `"blocked"`     — 企业用户被限制普通登录
+ * - `"firebase"`                — 老 Firebase 账号 + 已设密码，走 Firebase 邮箱密码登录
+ * - `"devin"`                   — 已迁移或新 Auth1 账号，走 Devin 账密登录（Windsurf 桥接）
+ * - `"devin_native"`            — 纯 Devin 原生账号（仅 app.devin.ai 侧有记录）且已设密码（v1.7.6 新增）
+ * - `"devin_native_no_password"`— 纯 Devin 原生账号未设密码，需改用邮箱验证码登录（v1.7.6 新增）
+ * - `"sso"`                     — 挂接企业 SSO，必须在浏览器中完成 SSO 跳转
+ * - `"no_password"`             — 老账号仅用过 Google/GitHub，需用 OAuth 或先重置密码
+ * - `"not_found"`               — 邮箱三侧都不存在，需先注册
+ * - `"blocked"`                 — 企业用户被限制普通登录
  */
 export type LoginMethodRecommendation =
   | 'firebase'
@@ -239,14 +241,17 @@ export type LoginMethodRecommendation =
   | 'sso'
   | 'no_password'
   | 'not_found'
-  | 'blocked';
+  | 'blocked'
+  | 'devin_native'
+  | 'devin_native_no_password';
 
 /**
  * 登录流派嗅探聚合结果
  *
- * 由后端 `sniff_login_method` Tauri 命令返回，聚合：
- * - Firebase 侧 `CheckUserLoginMethod`
- * - Devin 侧 `/_devin-auth/connections`
+ * 由后端 `sniff_login_method` Tauri 命令返回，聚合三路探测：
+ * - Firebase(WS) 侧 `CheckUserLoginMethod`
+ * - Windsurf 同源桥接侧 `windsurf.com/_devin-auth/connections`
+ * - Devin 原生侧 `app.devin.ai/api/auth1/connections`（v1.7.6 新增）
  */
 export interface LoginMethodSniffResult {
   /** 建议的登录流派 */
@@ -261,15 +266,23 @@ export interface LoginMethodSniffResult {
   redirect_url: string | null;
   disallow_enterprise: boolean;
 
-  // ==== Devin 侧原始判定 ====
-  /** Devin `/connections` 返回的原始 JSON，接口失败或邮箱不存在时为 null */
+  // ==== Windsurf 桥接侧原始判定（windsurf.com/_devin-auth/connections）====
+  /** Windsurf 桥接侧 `/connections` 的原始 JSON，接口失败或邮箱不存在时为 null */
   devin_connections: Record<string, any> | null;
-  /** Devin 侧 `method` 字段：`"auth1"` | `"not_found"` | null */
+  /** Windsurf 桥接侧 `auth_method.method`：`"auth1"` | `"not_found"` | null */
   devin_method: string | null;
-  /** Devin 侧 `has_password` 字段 */
+  /** Windsurf 桥接侧 `auth_method.has_password` 字段 */
   devin_has_password: boolean | null;
-  /** Devin 侧 `sso_connections` 数组是否非空 */
+  /** Windsurf 桥接侧 `auth_method.sso_connections` 数组是否非空 */
   has_sso_connection: boolean;
+
+  // ==== Devin 原生侧原始判定（app.devin.ai/api/auth1/connections，v1.7.6 新增）====
+  /** Devin 原生侧 `/connections` 的原始 JSON，接口失败或邮箱不存在时为 null */
+  devin_native_connections: Record<string, any> | null;
+  /** Devin 原生侧 `auth_method.method` 字段 */
+  devin_native_method: string | null;
+  /** Devin 原生侧 `auth_method.has_password` 字段 */
+  devin_native_has_password: boolean | null;
 }
 
 // ============================================================

@@ -76,19 +76,16 @@ pub async fn add_account_by_refresh_token(
     
     let email = account_info.email.clone();
     
-    // 检查账号是否已存在
-    let existing_accounts = store.get_all_accounts()
-        .await
-        .map_err(|e| e.to_string())?;
-    
-    if existing_accounts.iter().any(|acc| acc.email.to_lowercase() == email.to_lowercase()) {
+    // 检查账号是否已存在（SQLite 精准查询，替代全量 get_all_accounts 遍历）
+    if store.account_store.email_exists(&email).unwrap_or(false) {
         return Err(format!("账号 {} 已存在", email));
     }
     
     // Step 3: 创建账号（使用空密码，因为我们有 refresh_token）
     let final_nickname = nickname.unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
     
-    let mut account = store.add_account(email.clone(), String::new(), final_nickname)
+    // v1.7.8 批量导入性能修复：_no_save 变体 + 末尾 request_save_coalesced 合并落盘
+    let mut account = store.add_account_no_save(email.clone(), String::new(), final_nickname)
         .await
         .map_err(|e| e.to_string())?;
     
@@ -156,7 +153,7 @@ pub async fn add_account_by_refresh_token(
         }
     }
 
-    store.update_account(account.clone())
+    store.update_account_no_save(account.clone())
         .await
         .map_err(|e| e.to_string())?;
     
@@ -169,6 +166,9 @@ pub async fn add_account_by_refresh_token(
     .with_account(account.id, email.clone());
     
     let _ = store.add_log(log).await;
+
+    // v1.7.8 批量导入性能修复：统一触发一次合并落盘（非阻塞）
+    store.inner().request_save_coalesced();
     
     Ok(json!({
         "success": true,
@@ -349,29 +349,50 @@ pub async fn delete_accounts_batch(
     ids: Vec<String>,
     store: State<'_, Arc<DataStore>>,
 ) -> Result<serde_json::Value, String> {
-    let mut success_count = 0;
-    let mut failed_ids = Vec::new();
-    
-    for id_str in ids {
-        if let Ok(uuid) = Uuid::parse_str(&id_str) {
-            if store.delete_account(uuid).await.is_ok() {
-                success_count += 1;
-            } else {
-                failed_ids.push(id_str);
-            }
-        } else {
-            failed_ids.push(id_str);
+    // 性能修复（v1.7.6，与主端同步）：原实现循环调用 delete_account，每删一个都走一次
+    // save + save_logs（即 2 次 atomic_write），50 个账号 = 100 次文件写盘，在
+    // NTFS / 防病毒实时扫描场景下耗时可达数秒到数十秒。改为单次原子批量删除：
+    // 一次拿锁 + 一次 retain + 一次 save，IO 从 O(N) 降到 O(1)。
+    //
+    // 返回结构保持原 {success_count, failed_ids} 不变，前端无需任何改动。
+
+    // Step 1：解析 UUID，分离合法 / 非法字符串
+    let mut valid_uuids: Vec<Uuid> = Vec::with_capacity(ids.len());
+    let mut failed_ids: Vec<String> = Vec::new();
+    for id_str in &ids {
+        match Uuid::parse_str(id_str) {
+            Ok(uuid) => valid_uuids.push(uuid),
+            Err(_) => failed_ids.push(id_str.clone()),
         }
     }
-    
+
+    // Step 2：批量调 store 的原子方法，得到 (deleted, not_found)
+    let (deleted_ids, not_found_ids) = store
+        .delete_accounts_batch(&valid_uuids)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // not_found（UUID 合法但 accounts 里不存在）也算 failed，追加到 failed_ids
+    failed_ids.extend(not_found_ids.iter().map(|u| u.to_string()));
+
+    let success_count = deleted_ids.len();
+
     // 记录批量操作日志
     let log = OperationLog::new(
         OperationType::BatchOperation,
-        if failed_ids.is_empty() { OperationStatus::Success } else { OperationStatus::Failed },
-        format!("批量删除账号: 成功{}个，失败{}个", success_count, failed_ids.len()),
+        if failed_ids.is_empty() {
+            OperationStatus::Success
+        } else {
+            OperationStatus::Failed
+        },
+        format!(
+            "批量删除账号: 成功{}个，失败{}个",
+            success_count,
+            failed_ids.len()
+        ),
     );
     let _ = store.add_log(log).await;
-    
+
     Ok(json!({
         "success_count": success_count,
         "failed_ids": failed_ids
@@ -434,4 +455,57 @@ pub async fn filter_accounts_by_tags(
         .collect();
     
     Ok(filtered)
+}
+
+// ==================== v1.7.8 方案 B：分页查询 + 聚合统计 ====================
+
+use crate::repository::sqlite_account_store::{
+    AccountPageRequest, AccountPageResponse, AccountAggregates,
+};
+
+#[tauri::command]
+pub async fn get_accounts_page(
+    request: AccountPageRequest,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<AccountPageResponse, String> {
+    store.account_store.get_accounts_page(&request)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_account_aggregates(
+    store: State<'_, Arc<DataStore>>,
+) -> Result<AccountAggregates, String> {
+    store.account_store.get_aggregates()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_all_account_ids(
+    group: Option<String>,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<Vec<String>, String> {
+    store.account_store.get_all_ids(group.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// 按 ID 列表精准查询账号（跨页选中操作需要完整数据时使用）
+#[tauri::command]
+pub async fn get_accounts_by_ids(
+    ids: Vec<String>,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<Vec<Account>, String> {
+    store.account_store.get_accounts_by_ids(&ids)
+        .map_err(|e| e.to_string())
+}
+
+/// 按 ID 列表批量更改分组（跨页选中批量操作）
+#[tauri::command]
+pub async fn batch_update_group_by_ids(
+    ids: Vec<String>,
+    group: String,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<usize, String> {
+    store.account_store.update_group_by_ids(&ids, &group)
+        .map_err(|e| e.to_string())
 }

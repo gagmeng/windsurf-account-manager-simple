@@ -381,20 +381,19 @@ pub async fn apply_seamless_patch_internal(
     let client_type = settings.windsurf_client_type.clone();
     data_store.update_settings(settings).await.map_err(|e| e.to_string())?;
     
-    // 8. 重启Windsurf（仅在进程运行中时才重启）
+    // 8. 重启客户端（仅在进程运行中时才重启）
     let restarted = restart_windsurf(&client_type).await?;
-    let message = if restarted {
-        "补丁应用成功，客户端正在重启"
-    } else {
-        "补丁应用成功（客户端未运行，无需重启）"
-    };
+    let config = get_client_config(&client_type);
     
     Ok(serde_json::json!({
         "success": true,
         "modifications": modifications,
         "backup_file": backup_file.to_string_lossy().to_string(),
-        "restarted": restarted,
-        "message": message
+        "message": if restarted {
+            format!("补丁应用成功，{}已重启", config.process_name)
+        } else {
+            format!("补丁应用成功，{}未运行无需重启", config.process_name)
+        }
     }))
 }
 
@@ -439,16 +438,15 @@ pub async fn restore_seamless_patch(
     
     // 重启Windsurf（仅在进程运行中时才重启）
     let restarted = restart_windsurf(&client_type).await?;
-    let message = if restarted {
-        "补丁已还原，客户端正在重启"
-    } else {
-        "补丁已还原（客户端未运行，无需重启）"
-    };
+    let config = get_client_config(&client_type);
     
     Ok(serde_json::json!({
         "success": true,
-        "restarted": restarted,
-        "message": message,
+        "message": if restarted {
+            format!("补丁已还原，{}已重启", config.process_name)
+        } else {
+            format!("补丁已还原，{}未运行无需重启", config.process_name)
+        },
         "backup_used": backup_path.to_string_lossy().to_string()
     }))
 }
@@ -531,16 +529,14 @@ pub async fn check_patch_status(
         && !pattern2_original_present
         && !pattern3_original_present;
     // 辅助标识：文件里是否含有当前版本注入代码的特征字符串，便于前端区分版本
-    let has_oauth_handler = content.contains(CURRENT_VERSION_MARKER);
-    let has_timeout_removed = !pattern2_original_present;
-    let prompt_bypass_applied = !pattern3_original_present;
+    let current_version = content.contains(CURRENT_VERSION_MARKER);
     
     Ok(serde_json::json!({
         "installed": installed,
-        "current_version": has_oauth_handler,
-        "oauth_handler": has_oauth_handler,
-        "timeout_removed": has_timeout_removed,
-        "prompt_bypass_applied": prompt_bypass_applied
+        "current_version": current_version,
+        "oauth_handler": !pattern1_original_present,
+        "timeout_removed": !pattern2_original_present,
+        "prompt_bypass_applied": !pattern3_original_present
     }))
 }
 

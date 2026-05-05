@@ -35,8 +35,8 @@ export async function validateCardNumber(cardNumber: string): Promise<boolean> {
  * 获取试用支付链接（增强版）
  */
 export async function getTrialPaymentLink(
+  id: string,
   accountName: string,
-  token: string,
   autoOpen: boolean,
   teamsTier: number,
   paymentPeriod: number,
@@ -46,8 +46,8 @@ export async function getTrialPaymentLink(
   turnstileToken?: string
 ): Promise<any> {
   return await invoke('get_trial_payment_link_enhanced', {
+    id,
     accountName,
-    token,
     autoOpen,
     teamsTier,
     paymentPeriod,

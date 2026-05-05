@@ -44,8 +44,73 @@ export const accountApi = {
 
   async filterAccountsByTags(tags: string[]): Promise<Account[]> {
     return await invoke('filter_accounts_by_tags', { tags });
-  }
+  },
+
+  // v1.7.8 方案 B：分页查询 + 聚合统计
+
+  async getAccountsPage(request: AccountPageRequest): Promise<AccountPageResponse> {
+    return await invoke('get_accounts_page', { request });
+  },
+
+  async getAccountAggregates(): Promise<AccountAggregates> {
+    return await invoke('get_account_aggregates');
+  },
+
+  async getAllAccountIds(group?: string): Promise<string[]> {
+    return await invoke('get_all_account_ids', { group: group || null });
+  },
+
+  /** 按 ID 列表精准查询账号（跨页选中操作需完整数据时使用） */
+  async getAccountsByIds(ids: string[]): Promise<Account[]> {
+    return await invoke('get_accounts_by_ids', { ids });
+  },
+
+  /** 按 ID 列表批量更改分组（跨页选中批量操作） */
+  async batchUpdateGroupByIds(ids: string[], group: string): Promise<number> {
+    return await invoke('batch_update_group_by_ids', { ids, group });
+  },
 };
+
+export interface AccountPageRequest {
+  page?: number;
+  page_size?: number;
+  search?: string;
+  group?: string;
+  tags?: string[];
+  plan_names?: string[];
+  domains?: string[];
+  statuses?: string[];
+  remaining_quota_min?: number;
+  remaining_quota_max?: number;
+  total_quota_min?: number;
+  total_quota_max?: number;
+  expiry_days_min?: number;
+  expiry_days_max?: number;
+  daily_quota_percent_min?: number;
+  daily_quota_percent_max?: number;
+  weekly_quota_percent_min?: number;
+  weekly_quota_percent_max?: number;
+  sort_field?: string;
+  sort_direction?: string;
+}
+
+export interface AccountPageResponse {
+  accounts: Account[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface AccountAggregates {
+  total_count: number;
+  groups: string[];
+  plan_names: string[];
+  domains: string[];
+  tags: string[];
+  active_count: number;
+  group_counts: Record<string, number>;
+  tag_counts: Record<string, number>;
+}
 
 // API操作
 export const apiService = {
@@ -574,6 +639,35 @@ export const devinApi = {
     orgId?: string;
   }): Promise<DevinLoginResult> {
     return await invoke('add_account_by_devin_login', {
+      email: params.email,
+      password: params.password,
+      nickname: params.nickname,
+      tags: params.tags,
+      group: params.group,
+      orgId: params.orgId,
+    });
+  },
+
+  /**
+   * **Devin 原生账密登录 + 建账号**（v1.7.6 新增）
+   *
+   * 与 `addAccountByLogin` 的关键区别：
+   * - 端口走 `app.devin.ai/api/auth1/password/login`（**Devin 原生侧**），而非 Windsurf 桥接侧
+   * - 适用场景：`sniffLoginMethod` 返回 `recommended="devin_native"` 的纯 Devin 原生账号
+   *   （在 Firebase + Windsurf 桥接两侧都查不到，仅在 app.devin.ai 侧有注册记录）
+   * - 内部仍会调 `WindsurfPostAuth` 桥接产出 session_token，落库字段与 `addAccountByLogin` 完全对齐
+   *
+   * 多组织场景下返回 `requires_org_selection=true` + orgs，UI 调 `addAccountWithOrg` 二次完成。
+   */
+  async addAccountByDevinNativeLogin(params: {
+    email: string;
+    password: string;
+    nickname?: string;
+    tags: string[];
+    group?: string;
+    orgId?: string;
+  }): Promise<DevinLoginResult> {
+    return await invoke('add_account_by_devin_native_login', {
       email: params.email,
       password: params.password,
       nickname: params.nickname,

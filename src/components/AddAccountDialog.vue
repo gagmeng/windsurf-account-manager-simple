@@ -1003,12 +1003,19 @@ async function handleFirebaseSubmit() {
 }
 
 /**
- * 智能识别模式：先嗅探账号属于 Firebase / Devin 哪一派，再自动分派
+ * 智能识别模式：先嗅探账号属于哪一派，再自动分派
  *
- * 后端 `sniff_login_method` 并发调两侧探测端点，返回 `recommended` 字段：
- * - firebase：走 `handleFirebaseSubmit`
- * - devin：　走 `handleDevinSubmit`
- * - sso / no_password / not_found / blocked：弹对话框指引用户处理
+ * 后端 `sniff_login_method` 并发三路探测：
+ * 1. Firebase 侧 `CheckUserLoginMethod`
+ * 2. Windsurf 桥接侧 `/_devin-auth/connections`
+ * 3. **Devin 原生侧** `app.devin.ai/api/auth1/connections`
+ *
+ * 返回 `recommended` 字段的分派：
+ * - `firebase`                → `handleFirebaseSubmit`
+ * - `devin`                   → `handleDevinSubmit`（Windsurf 桥接侧密码登录）
+ * - `devin_native`            → `handleDevinNativeSubmit`（Devin 原生侧密码登录，v1.7.6 新增）
+ * - `devin_native_no_password`→ 提示用户改用邮箱验证码导入
+ * - `sso` / `no_password` / `not_found` / `blocked`：弹对话框指引用户处理
  */
 async function handleSmartSubmit() {
   const trimmedEmail = formData.email.trim();
@@ -1037,6 +1044,19 @@ async function handleSmartSubmit() {
     case 'devin':
       ElMessage.success('已识别为 Devin 账号，正在登录……');
       await handleDevinSubmit();
+      break;
+    case 'devin_native':
+      // v1.7.6 新增：纯 Devin 原生账号（仅在 app.devin.ai 侧存在，Windsurf 桥接侧查不到）
+      ElMessage.success('已识别为 Devin 原生账号，正在登录……');
+      await handleDevinNativeSubmit();
+      break;
+    case 'devin_native_no_password':
+      // Devin 原生侧账号但未设密码：引导用户走「Devin 注册」Tab 的「Devin 原生」邮箱验证码登录
+      await ElMessageBox.alert(
+        `${sniff.reason}\n\n请打开「账户注册」→「Devin 注册」 Tab，选择「Devin 原生」来源，用邮箱验证码登录。`,
+        'Devin 原生账号（无密码）',
+        { type: 'warning', confirmButtonText: '我知道了' }
+      ).catch(() => {});
       break;
     case 'sso':
       // 企业 SSO 账号：有些组织仍允许邮箱验证码登录，提供快捷按钮尝试
@@ -1099,6 +1119,71 @@ async function handleSmartSubmit() {
       break;
     default:
       ElMessage.error(`未知的嗅探结果：${sniff.recommended}`);
+  }
+}
+
+/**
+ * Devin 原生侧账密登录流程（v1.7.6 新增）
+ *
+ * 与 `handleDevinSubmit`（走 Windsurf 桥接）的关键区别：
+ * - 调 `addAccountByDevinNativeLogin`，走 `app.devin.ai/api/auth1/password/login`
+ * - 适用场景：纯 Devin 原生账号（在 Firebase + Windsurf 桥接两侧都查不到，
+ *   仅在 app.devin.ai 侧有注册记录）
+ * - 多组织处理逻辑与 handleDevinSubmit 完全一致（后端两侧命令输出结构相同）
+ */
+async function handleDevinNativeSubmit() {
+  const trimmedEmail = formData.email.trim();
+  const trimmedPassword = formData.password.trim();
+  const trimmedNickname = formData.nickname.trim() || undefined;
+
+  if (!trimmedEmail || !trimmedPassword) {
+    ElMessage.error('邮箱和密码不能为空');
+    return;
+  }
+
+  const result = await devinApi.addAccountByDevinNativeLogin({
+    email: trimmedEmail,
+    password: trimmedPassword,
+    nickname: trimmedNickname,
+    tags: formData.tags,
+    group: formData.group || '默认分组',
+  });
+
+  // 分支 1：需要选择组织（返回格式与 Windsurf 桥接侧完全一致）
+  if (result.requires_org_selection && result.auth1_token && result.orgs) {
+    const chosenOrg = await promptOrgSelection(result.orgs);
+    if (!chosenOrg) {
+      ElMessage.info('已取消多组织选择');
+      return;
+    }
+
+    const confirmResult = await devinApi.addAccountWithOrg({
+      email: trimmedEmail,
+      auth1Token: result.auth1_token,
+      orgId: chosenOrg,
+      nickname: trimmedNickname,
+      tags: formData.tags,
+      group: formData.group || '默认分组',
+      password: trimmedPassword,
+    });
+
+    if (confirmResult.success) {
+      ElMessage.success(`Devin 原生账号 ${trimmedEmail} 添加成功`);
+      await accountsStore.loadAccounts();
+      handleClose();
+    } else {
+      ElMessage.error(confirmResult.message || '组织选择后创建账号失败');
+    }
+    return;
+  }
+
+  // 分支 2：直接成功
+  if (result.success) {
+    ElMessage.success(`Devin 原生账号 ${result.email || trimmedEmail} 添加成功`);
+    await accountsStore.loadAccounts();
+    handleClose();
+  } else {
+    ElMessage.error(result.message || 'Devin 原生账号登录失败');
   }
 }
 
@@ -1333,8 +1418,9 @@ function escapeHtml(s: string): string {
  */
 async function switchToEmailCodeModeAndSend(flow: 'login' | 'signup' = 'login') {
   addMode.value = 'devin_email_code';
-  // smart 分派进入的场景都是 Windsurf 侧（sniff_login_method 只探测 windsurf.com 侧的登录方式），
-  // 合并卡默认 source='devin_native' 会走错端口，此处必须强制置为 'windsurf_side'
+  // 本函数的调用者都是 Windsurf 侧场景（no_password / sso / not_found：均来自 Firebase + Windsurf
+  // 桥接侧判定；纯 Devin 原生场景在 v1.7.6 后已有独立分支 devin_native / devin_native_no_password
+  // 不会走到这里），所以合并卡强制 source='windsurf_side' 避免注册发错端口
   devinEmailCodeSource.value = 'windsurf_side';
   devinEmailCodeFlow.value = flow;
   devinEmailCodeStep.value = 0;

@@ -62,10 +62,7 @@
           </el-form-item>
           
           <el-form-item label="界面主题">
-            <el-radio-group v-model="settings.theme">
-              <el-radio-button label="light">浅色</el-radio-button>
-              <el-radio-button label="dark">深色</el-radio-button>
-            </el-radio-group>
+            <ThemeSelector v-model="settings.theme" />
           </el-form-item>
           
           <el-form-item label="显示详细结果">
@@ -676,6 +673,7 @@ import { Connection, Check, Close } from '@element-plus/icons-vue';
 import { useSettingsStore, useUIStore } from '@/store';
 import { invoke } from '@tauri-apps/api/core';
 import { systemApi } from '@/api';
+import ThemeSelector from '@/components/ThemeSelector.vue';
 
 const settingsStore = useSettingsStore();
 const uiStore = useUIStore();
@@ -749,7 +747,7 @@ const settings = reactive<{
   auto_refresh_token: true,
   seat_count_options: [18, 19, 20],
   retry_times: 2,
-  theme: 'light',
+  theme: 'aurora',
   concurrent_limit: 5,
   show_seats_result_dialog: false,  // 默认关闭
   autoOpenPaymentLinkInWebview: false,  // 默认关闭自动打开支付页面
@@ -1048,7 +1046,7 @@ async function handleSave() {
       settings.windsurfPath = windsurfPath.value;
     }
     await settingsStore.updateSettings(settings);
-    uiStore.setTheme(settings.theme as 'light' | 'dark');
+    uiStore.setTheme(settings.theme);
     ElMessage.success('设置保存成功');
     handleClose();
   } catch (error) {
@@ -1416,11 +1414,6 @@ void parseSeatCountOptions;
 </script>
 
 <style scoped>
-/* 深色模式样式 */
-:deep(.el-dialog) {
-  /* 在深色模式下由全局样式控制 */
-}
-
 /* 深色模式下的描述文字 */
 :root.dark .el-form-item > div[style*="color: #909399"] {
   color: #94a3b8 !important;

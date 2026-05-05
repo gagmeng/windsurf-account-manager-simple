@@ -823,12 +823,16 @@ async fn reset_credits_internal(
         .await
         .map_err(|e: AppError| e.to_string())?;
     
+    // v1.7.7 批量积分重置性能修复（与主端同步）：_no_save 变体 + request_save_coalesced 合并落盘
+    // 单账号 reset_credits 路径：coalescer 立即 spawn worker 异步落盘（exit hook 兜底 crash 安全）。
+    // batch_reset_credits 路径：N 个并发 reset 的 N 次 save 经 CAS 合并为 1~2 次实际 atomic_write。
     // 更新最后使用的座位数
     if let Some(used_seat_count) = result.get("seat_count_used").and_then(|v| v.as_i64()) {
         account.last_seat_count = Some(used_seat_count as i32);
-        store.update_account(account.clone())
+        store.update_account_no_save(account.clone())
             .await
             .map_err(|e| e.to_string())?;
+        store.request_save_coalesced();
     }
     
     // 记录详细的操作日志
@@ -2098,16 +2102,18 @@ pub async fn delete_windsurf_user(
 
 /// 检查Pro试用资格
 ///
-/// 前端先调 `get_account_valid_token` 确保传入的是经 ensure_valid_token 刷新后的有效 token，
-/// 再以该 token 作为 `auth_token` 入参调本命令。Windsurf 后端对过期但结构合法的 Firebase
-/// ID Token 仍可能误返回 is_eligible=true，因此 Service 层做了严格 protobuf 解析 + Content-Type
-/// 校验以 fail-fast。
+/// 接收 account_id 从 SQLite 读取完整账号，构造正确的 AuthContext：
+/// - Firebase 账号：header `authorization: Bearer <idToken>`
+/// - Devin 账号：header `x-auth-token` + `x-devin-session-token` + `x-devin-account-id` 等
 #[tauri::command]
 pub async fn check_pro_trial_eligibility(
-    auth_token: String,
+    id: String,
+    store: State<'_, Arc<DataStore>>,
 ) -> Result<serde_json::Value, String> {
-    // auth_token 是 Firebase ID Token，构造 Firebase AuthContext
-    let ctx = AuthContext::firebase(auth_token);
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let mut account = store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    ensure_valid_token(&store, &mut account, uuid).await?;
+    let ctx = AuthContext::from_account(&account).map_err(|e| e.to_string())?;
     let windsurf_service = WindsurfService::new();
     windsurf_service.check_pro_trial_eligibility(&ctx).await.map_err(|e| e.to_string())
 }

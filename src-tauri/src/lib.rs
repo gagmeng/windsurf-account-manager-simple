@@ -56,6 +56,35 @@ pub fn run() {
                 }
             });
             
+            // 启动自动备份任务
+            let store_for_backup = store.clone();
+            tauri::async_runtime::spawn(async move {
+                println!("[Backup] 自动备份任务已启动");
+                
+                // 首次备份延迟1分钟执行
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                
+                loop {
+                    // 获取当前备份设置
+                    let (enabled, interval_minutes) = match store_for_backup.get_settings().await {
+                        Ok(settings) => (settings.auto_backup_enabled, settings.backup_interval),
+                        Err(_) => (true, 10), // 默认值
+                    };
+                    
+                    // 执行备份（如果启用）
+                    if enabled {
+                        match store_for_backup.create_timestamped_backup().await {
+                            Ok(path) => println!("[Backup] 自动备份成功: {:?}", path.file_name()),
+                            Err(e) => println!("[Backup] 自动备份失败: {}", e),
+                        }
+                    }
+                    
+                    // 等待下一次备份
+                    let interval = std::time::Duration::from_secs(interval_minutes.max(1) as u64 * 60);
+                    tokio::time::sleep(interval).await;
+                }
+            });
+            
             // 获取版本号并设置窗口标题
             let version = app.package_info().version.to_string();
             if let Some(window) = app.get_webview_window("main") {
@@ -77,6 +106,12 @@ pub fn run() {
             commands::search_accounts,
             commands::filter_accounts_by_group,
             commands::filter_accounts_by_tags,
+            // v1.7.8 方案 B：分页查询 + 聚合统计
+            commands::get_accounts_page,
+            commands::get_account_aggregates,
+            commands::get_all_account_ids,
+            commands::get_accounts_by_ids,
+            commands::batch_update_group_by_ids,
             
             // API操作命令
             commands::login_account,
@@ -238,6 +273,7 @@ pub fn run() {
             commands::devin_password_login,
             commands::devin_windsurf_post_auth,
             commands::add_account_by_devin_login,
+            commands::add_account_by_devin_native_login,
             commands::add_account_by_devin_with_org,
             commands::refresh_devin_session,
             commands::add_account_by_devin_session_token,
@@ -264,6 +300,25 @@ pub fn run() {
             commands::devin_app_email_complete,
             commands::add_account_by_devin_native_register,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // v1.7.8 批量导入性能修复配套：退出前强制 flush DataStore 的 coalesced saves
+            //
+            // 背景：批量导入等批量场景改用 `request_save_coalesced` 非阻塞合并写盘，
+            // tauri command 返回时数据可能还在内存中。正常退出路径下 ExitRequested
+            // 事件是我们同步落盘的最后机会——阻塞 block_on 执行 flush_pending_saves
+            // 确保两个配置文件（accounts.json / logs.json）都已原子写入磁盘。
+            //
+            // 进程异常终止（kill -9、断电等）场景下本 hook 不会被调用，数据可能丢失
+            // 最后几百 ms 的批量改动——这是 coalescer 架构的已知权衡。
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let store = app_handle.state::<Arc<DataStore>>();
+                tauri::async_runtime::block_on(async {
+                    if let Err(e) = store.flush_pending_saves().await {
+                        eprintln!("[lib::run] flush_pending_saves on exit failed: {}", e);
+                    }
+                });
+            }
+        });
 }

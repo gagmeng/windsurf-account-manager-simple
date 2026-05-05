@@ -1,4 +1,5 @@
 use crate::commands::patch_commands::{detect_windsurf_path_internal, apply_seamless_patch_internal};
+use crate::models::{OperationLog, OperationType, OperationStatus};
 use crate::repository::DataStore;
 use crate::utils::errors::{AppError, AppResult};
 use chrono::Utc;
@@ -471,13 +472,20 @@ pub async fn switch_account(
             info!("Auto-applying seamless patch at: {}", path);
             match apply_seamless_patch_internal(path, &data_store).await {
                 Ok(result) => {
+                    let already_patched = result.get("already_patched")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let success = result.get("success")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if success {
                         seamless_patch_active = true;
                         auto_enabled_seamless = true;
-                        info!("Seamless patch auto-applied successfully");
+                        if already_patched {
+                            info!("Seamless patch was already applied");
+                        } else {
+                            info!("Seamless patch auto-applied successfully");
+                        }
                     }
                 }
                 Err(e) => {
@@ -527,6 +535,14 @@ pub async fn switch_account(
     }
     
     info!("Successfully triggered Windsurf login for account");
+    
+    // 记录切换账号日志
+    let log = OperationLog::new(
+        OperationType::SwitchAccount,
+        OperationStatus::Success,
+        format!("切换账号: {}", account.email),
+    ).with_account(account_id, account.email);
+    let _ = data_store.add_log(log).await;
     
     let (_, client_display) = get_client_uri_config(&client_type);
     

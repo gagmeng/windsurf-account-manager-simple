@@ -329,9 +329,9 @@ function getTagStyle(color: string): Record<string, string> {
   };
 }
 
-// 获取标签使用次数
+// 获取标签使用次数（v1.7.8 方案 B：从后端聚合统计读取）
 function getTagUsageCount(tagName: string): number {
-  return accountsStore.accounts.filter(a => a.tags.includes(tagName)).length;
+  return accountsStore.aggregates.tag_counts[tagName] ?? 0;
 }
 
 // 添加标签

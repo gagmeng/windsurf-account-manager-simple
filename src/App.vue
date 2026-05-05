@@ -91,7 +91,7 @@ onMounted(async () => {
   // 如果设置中有主题且与当前不同，则应用设置中的主题
   const settingsTheme = settingsStore.settings.theme;
   if (settingsTheme && settingsTheme !== uiStore.theme) {
-    uiStore.setTheme(settingsTheme as 'light' | 'dark');
+    uiStore.setTheme(settingsTheme);
   } else {
     // 确保当前主题被应用
     uiStore.setTheme(uiStore.theme);
@@ -102,21 +102,12 @@ onMounted(async () => {
   
   // 监听后端 token 刷新事件，自动更新前端账户数据
   tokenRefreshedUnlisten = await listen<{ account_id: string; token: string; token_expires_at: string }>('token-refreshed', (event) => {
-    const { account_id, token, token_expires_at } = event.payload;
+    const { account_id } = event.payload;
     console.log('[Token刷新事件] 后端已刷新账户 token:', account_id);
     
-    // 更新对应账户的 token 和过期时间
-    const idx = accountsStore.accounts.findIndex(acc => acc.id === account_id);
-    if (idx !== -1) {
-      const updatedAccount = { 
-        ...accountsStore.accounts[idx], 
-        token, 
-        token_expires_at, 
-        status: 'active' as const 
-      };
-      accountsStore.accounts.splice(idx, 1, updatedAccount);
-      console.log('[Token刷新事件] 已更新账户:', updatedAccount.email);
-    }
+    // v1.7.8：后端已更新 SQLite，前端刷新当前页即可（不再直接操作 accounts 数组）
+    accountsStore.fetchPage().catch(() => {});
+    console.log('[Token刷新事件] 已触发页面刷新');
   });
 });
 

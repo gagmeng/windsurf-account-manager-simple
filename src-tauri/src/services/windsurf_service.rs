@@ -3016,17 +3016,14 @@ impl WindsurfService {
     ///    读到 `tag=0x08, value=0x01` 时才判 `is_eligible = true`
     /// 3. 其它非预期响应形态一律 `success=false` 并回传 body 前若干字节 hex 便于定位
     pub async fn check_pro_trial_eligibility(&self, ctx: &AuthContext) -> AppResult<serde_json::Value> {
-        let auth_token = ctx.token_str();
         let url = "https://web-backend.windsurf.com/exa.seat_management_pb.SeatManagementService/CheckProTrialEligibility";
 
-        // 构建请求体: field 1 = auth_token (string)
+        // 构建 protobuf body: field 1 = auth_token (string)
+        let auth_token = ctx.token_str();
         let token_bytes = auth_token.as_bytes();
         let token_len = token_bytes.len();
-
         let mut body: Vec<u8> = Vec::new();
         body.push(0x0a); // field 1, wire type 2 (length-delimited)
-
-        // 编码长度 (varint)
         if token_len < 128 {
             body.push(token_len as u8);
         } else {
@@ -3035,8 +3032,10 @@ impl WindsurfService {
         }
         body.extend_from_slice(token_bytes);
 
+        // with_auth 设置正确的认证 headers（Firebase/Devin 自动区分）
         let response = self.client
             .post(url)
+            .with_auth(ctx)
             .body(body)
             .header("accept", "*/*")
             .header("connect-protocol-version", "1")

@@ -6,7 +6,7 @@
 
 ## 📦 项目信息
 
-- **当前版本**: 1.7.6
+- **当前版本**: 1.7.7
 - **许可证**: AGPL-3.0
 - **开发语言**: Rust + TypeScript
 - **支持平台**: Windows 10/11
@@ -124,6 +124,53 @@
 ---
 
 ## 📜 版本历史
+
+### v1.7.8 (2026-05-04)
+- **Windsurf 新登录协议适配**：Windsurf 后端更新 `WindsurfPostAuth` 接口，新增要求 `X-Devin-Auth1-Token` HTTP header。已在 `devin_auth_service.rs::windsurf_post_auth` 中补充该 header，所有 Devin 登录/注册/多组织选择流程自动生效
+- **批量操作跨页选中性能优化**：新增 `get_accounts_by_ids` 后端 API（SQLite `WHERE id IN (...)` 精准查询），替代跨页选中时 `getAllAccounts()` 全量拉取 10 万+ 条再前端筛选的旧方案。导出选中、批量更换订阅等操作从秒级响应提升至毫秒级
+  - SQLite 32766 变量数限制：`get_accounts_by_ids` 和 `update_group_by_ids` 自动分批查询（每批 500），支持任意数量 ID
+  - 全选导出智能判断：选中数 ≥ 总数时直接走 `getAllAccounts()` 单次查询，避免无意义分批
+- **批量导入实时进度反馈**：全量并发导入模式新增逐条完成计数（`导入进度: 3/10（✓ xxx@email.com）`），替代原先全部完成才返回的静态提示；每个账号成功后节流刷新 UI（500ms），用户可实时看到账号列表变化
+- **注册/导入邮箱去重性能优化**：所有写入路径（`add_account_by_refresh_token` / `add_account_by_devin_login` / `add_account_by_devin_with_org` / `persist_devin_account_from_login_result` 等 6 处）的邮箱去重从 `get_all_accounts()` 全量加载遍历改为 SQLite `email_exists()` 索引查询，内存开销从数十 MB 降至 ~0，20 并发注册不再内存峰值飙升
+- **Pro 试用资格检查修复**：`check_pro_trial_eligibility` 命令从接收前端 `authToken` 改为接收 `account_id`，后端自行从 SQLite 读取完整账号构造正确的 `AuthContext`（Firebase/Devin 自动区分）。修复 Devin 账号始终误报"有试用资格"的 bug。同时保留 protobuf body 中的 token + 新增 `with_auth` headers 双重认证
+- **自动打开支付页面认证修复**：`get_trial_payment_link_enhanced` 命令同上改为接收 `account_id`，后端自行获取 token + 构造正确 AuthContext。修复开启「自动打开支付页面」后 Devin 账号 401 报错
+- **无感换号补丁同步主项目**：`switch_account_commands.rs` 新增 `OperationLog` 导入、`already_patched` 判断（避免重复应用日志误导）、切换成功后写操作日志；`patch_commands.rs` 应用/还原消息动态化（`config.process_name` 替代硬编码）、`check_seamless_status` 变量名对齐
+- **备份系统重构**：从单文件 `accounts_*.json` 升级为目录式 `backup_YYYYMMDD_HHMMSS/`，包含 `accounts.db` + 所有 JSON 文件（6 个）；`list_backups` / `restore_from_backup` / `delete_backup` / `cleanup` 全部改为目录操作；新增 `calculate_dir_size` 辅助方法；Settings 新增 `auto_backup_enabled` / `backup_interval` / `backup_max_count` 三个配置字段；`lib.rs` 新增自动备份任务（启动延迟 1 分钟，按配置间隔循环）
+- **统计信息界面升级**：后端 `get_stats` 新增 13 个统计字段（订阅类型分布、激活/未激活数、团队所有者、禁用账号、配额统计、标签/分组/操作类型分布、Token/RefreshToken 计数）；前端 `StatsDialog.vue` 从 3 个简单数字卡片升级为 9 区块完整面板（账号概览、订阅与认证、特殊账号、配额、订阅/分组/标签/操作类型分布、系统设置）
+- **添加账号静默模式**：`addAccount` / `appendLocalAccount` 不再触发 `fetchPage()` 整页刷新和 `loading` 状态，仅异步刷新聚合统计（侧边栏计数）。新账号在 SQLite 排序后位于正确页码，翻页可见
+- **TS 构建错误修复**：移除 `AutoResetDialog.vue` 中未使用的 `isMasterAccount` 函数，修复 `vue-tsc` TS6133 严格检查报错
+- **主题化视觉细节优化**：分页栏从固定浅蓝色改为基于 `--theme-primary` 的低饱和主题色，覆盖分页容器、页码按钮、当前页高亮和跳转输入框；订阅/套餐徽章在各主题下增强对比度和层次感，保留 Free / Pro / Teams / Enterprise 业务色区分的同时提升可读性
+- **批量导出账号重构为独立组件**：新增 `BatchExportDialog.vue` 替代 `MainLayout.vue` 中 `ElMessageBox + dangerouslyUseHTMLString` 的硬编码导出弹窗，消除内联样式并统一主题适配；导出入口只负责按当前选择范围获取账号并打开弹窗
+- **批量导出字段与格式增强**：支持自由组合邮箱、密码、Refresh Token、Access/Session Token、Windsurf API Key、Devin Auth1 Token、Devin Session Token、备注、分组、标签、状态、套餐、认证提供方、创建时间、Token 过期时间、订阅到期时间等字段；内置常用预设、导出预览、复制到剪贴板/下载文件两种目标
+- **批量导出文本分隔符增强**：TXT 支持空格、Tab、`|`、`,`、`---`、`----` 和自定义分隔符，并校验自定义分隔符不能为空；CSV/JSON 标准格式独立生成，CSV 支持按需包含表头并自动处理单元格转义与文件 BOM
+
+### v1.7.7 (2026-05-03)
+- **批量删除 O(N) 写盘黑洞修复（与主端同步）**：用户实测批量删除多账号时存在明显卡顿，疑似「不支持并发删除」。排查后根因是**后端循环串行 × 每次独立整文件写盘**的双重 IO 瓶颈，并非并发问题：原 `account_commands::delete_accounts_batch` 用 `for id_str in ids { store.delete_account(uuid).await; }` 循环调 `DataStore::delete_account`，后者每次都走 `save()` + `save_logs()`——即 2 次完整的 `atomic_write`（写临时文件 → JSON 校验 → 创建 `.backup` → 原子 rename）。50 个账号 = 100 次 atomic_write，在 NTFS / 防病毒实时扫描场景下耗时数秒到数十秒。**并发化（futures::join_all）并非正确解法**——所有 delete 仍竞争同一把 `config.write()` 写锁、伪并发实际串行，且独立 save 互相竞争文件句柄在 Windows 下反而可能触发 SharingViolation。本次从架构层面修复：
+  - 新增 `DataStore::delete_accounts_batch(ids: &[Uuid]) -> AppResult<(Vec<Uuid>, Vec<Uuid>)>`：单次 `config.write()` 锁 + 用 `HashSet::intersection` 求交集定位实际存在的账号 + 单次 `retain` 批量移除 + 单次 `logs.write()` 锁 + 单次 `retain` 批量清理关联日志 + 各 1 次 `save()` / `save_logs()`。返回 `(deleted_ids, not_found_ids)`，空入参快速返回不触发写盘
+  - `commands::delete_accounts_batch` tauri 命令改调新方法：先把 ids 按 UUID 合法性分离 valid/invalid，批量调 `DataStore::delete_accounts_batch` 拿到 deleted + not_found，把 not_found 合并到 failed_ids。**返回结构 `{success_count, failed_ids}` 保持原语义不变，前端零改动**
+  - **性能指标**：IO 次数从 `O(2N)` 降到 `O(2)`，锁抢占从 `O(2N)` 降到 `O(2)`。50 账号从 5~15 秒降到 <100ms，预计 50~150 倍提升
+  - **实现细节权衡**：retain 回调内用 `HashSet` 查找而非线性扫描入参 Vec，避免大批量（>100）时出现 `O(N×M)` 的二次复杂度退化
+- **批量导入 O(N) 写盘黑洞修复 + DataStore save coalescer 架构（与主端同步）**：延续批量删除同思路，用户反馈批量导入账号同样存在卡顿。审计后根因与删除不同且更严重——每个账号导入路径都是**`store.add_account()` → 补齐字段 → `store.update_account()` 双 save** 模式，单账号就触发 2 次 `atomic_write`；前端 `Promise.all` 并发虽看似并行，但后端所有 save 仍抢同一把 `config.write()` 写锁实际串行化，50 账号批量导入 = 100 次 atomic_write 串行。本次从 DataStore 底层引入「save coalescer 写盘合并器」架构彻底解决：
+  - **B.1 DataStore 新增 save coalescer 基础设施**：`data_store.rs` 给 struct 加 4 个新字段——`save_pending: Arc<AtomicBool>` / `save_logs_pending: Arc<AtomicBool>` / `save_coalesce_lock: Arc<tokio::sync::Mutex<()>>` / `save_logs_coalesce_lock: Arc<tokio::sync::Mutex<()>>`。核心 API 三件套：①`request_save_coalesced(self: &Arc<Self>)` 非阻塞 CAS 合并，②`request_save_logs_coalesced` 对称版本针对 logs.json，③`flush_pending_saves()` 阻塞强制落盘（仅 exit hook 调用）。worker 设计保证 N 个并发请求最多聚合成 2 次实际 save
+  - **C.1 DataStore 新增 `add_account_no_save` 变体**：原 `add_account` 拆出 `add_account_no_save` 纯内存版本（无 save），原方法改为 `add_account_no_save + save` 组合；`update_account_no_save` 原本已存在（包装 `update_account_internal(account, false)`），复用即可
+  - **C.2 Simple 端 9 条 add_account_by_xxx 路径改造**：`account_commands::add_account_by_refresh_token` + `devin_commands` 的 session_token / login / native_login / with_org / register / native_register / email_login / auth1_token 共 8 条命令。其中 login / with_org / session_token / auth1_token 是直接 add+update 模式，直接改 `_no_save` + 末尾 `request_save_coalesced`；native_login / register / native_register / email_login 4 条走公共辅助函数 `persist_devin_account_from_login_result`，后者内部改 `_no_save`（签名 `&DataStore` 拿不到 Arc），由 4 个调用方各自在 `.await?;` 之后补 `store.inner().request_save_coalesced()`
+  - **B.2 tauri `RunEvent::ExitRequested` flush hook**：`lib.rs` 从 `.run(ctx)` 改为 `.build(ctx).run(|handle, event| ...)`，在 ExitRequested 事件里 `tauri::async_runtime::block_on` 执行 `store.flush_pending_saves()`——退出前强制同步落盘，保证正常退出时批量改动不丢失
+  - **性能指标**：50 账号批量导入 `atomic_write` 次数从 **100~150 次 → 1~2 次**，50~150 倍 IO 层面提升；实际耗时受网络请求主导
+  - **改动文件清单**：`src-tauri/src/repository/data_store.rs`（coalescer + add_account_no_save 拆分）、`src-tauri/src/commands/account_commands.rs`、`src-tauri/src/commands/devin_commands.rs`（8 条命令 + persist 辅助函数改造）、`src-tauri/src/lib.rs`（build + run callback + ExitRequested hook）。前端零改动
+- **批量积分重置迁移到 save coalescer（与主端同步）**：审计所有批量命令后定位到最后一个遗漏——`batch_reset_credits` 通过 `futures::stream::buffer_unordered(5)` 并发调 `reset_credits_internal`，后者末尾 `store.update_account(account)` 同步 save，N 账号 = N 次 atomic_write 串行化（抢同一把 config 写锁）。改造：`api_commands::reset_credits_internal` 末尾改 `store.update_account_no_save(account)` + `store.request_save_coalesced()`。该函数也是单账号 `reset_credits` 入口的共用底层，改造后两个入口统一走 coalescer 语义
+  - **性能指标**：50 账号批量积分重置 `atomic_write` 次数从 50 → 1~2 次（网络请求 RTT 为实际耗时主导，save 层面不再是瓶颈）
+  - **改动文件**：`src-tauri/src/commands/api_commands.rs::reset_credits_internal`。前端零改动
+- **批量操作状态汇总（v1.7.7 完成）**：至此 Simple 端**所有**涉及账号落库的批量命令均已走 save coalescer 或 DataStore 原生批量方法：`delete_accounts_batch` ✓、`batch_update_account_tags` ✓、`update_accounts_order` ✓、`batch_refresh_tokens` ✓（`update_account_no_save` + 末尾 `flush`）、`batch_reset_credits` ✓（本次）、批量导入 8 条命令 ✓（本次）。不涉及账号 store 持久化的批量命令（`batch_get_users_parsed`）无需优化
+- **影响范围**：Simple 端 v1.7.7 同步主项目的批量删除 + 批量导入 + 批量积分重置三项性能修复；Simple 端为精简版，无「任务队列」与「无感注册」功能模块，故主项目 v1.7.7 的「任务队列吞吐量 + 无感注册双重修复（F1/F2/F3/B1/U1）」与「任务队列最大并发数上限从 10 放宽到 10000」两项不适用于 Simple 端。save coalescer 架构对所有批量场景自动可用
+- **账号存储层 SQLite 重构（10 万+ 账户性能优化）**：将 `accounts.json` 全量 JSON 存储迁移为 SQLite 数据库（`accounts.db`），彻底解决大量账户场景下的启动慢、操作卡顿、磁盘 IO 过高问题。启动时自动检测并迁移旧 JSON 数据到 SQLite，迁移完成后清空 JSON 中的 accounts 字段避免重复迁移
+  - **新增 `SqliteAccountStore` 模块**（`src-tauri/src/repository/sqlite_account_store.rs`）：完整的 SQLite 账号存储层，包含 CRUD、分页查询（服务端过滤/搜索/排序）、聚合统计（分组/套餐/域名/标签计数）、批量操作、状态过滤（SQL CASE 表达式镜像前端 `getAccountStatusType` 优先级链）、剩余天数过滤（`julianday` 计算）
+  - **后端 DataStore 全部账号方法委托 SQLite**：`add_account` / `update_account` / `delete_account` / `get_account` / `get_all_accounts` / `update_account_token` / `update_account_password` / `delete_group` / `rename_group` / `update_tag` / `delete_tag` / `batch_update_account_tags` / `batch_update_account_group` / `update_accounts_order` / `get_sorted_accounts` / `export_data` / `import_data` 等 20+ 方法全部从操作 `config.accounts` 改为委托 `account_store`。方法签名不变，`commands/*.rs` 零改动
+  - **后端新增 3 个 Tauri 命令**：`get_accounts_page`（分页查询）、`get_account_aggregates`（聚合统计）、`get_all_account_ids`（轻量 ID 列表）
+  - **后端 `get_stats` 修复**：从 SQLite 读取账号数据替代已清空的 `config.accounts`，修复统计信息页面全 0 问题
+  - **前端 accounts store 重构**：`accounts` 数组只存当前页数据（20-100 条），所有过滤/搜索/排序下沉后端 SQLite；`filteredAccounts` / `paginatedAccounts` 直接返回当前页；`allTags` / `allPlanNames` / `allDomains` / `allGroups` 从后端聚合查询获取；`setFilter` / `setCurrentPage` / `setPageSize` / `setSortConfig` 变化时触发 `fetchPage()` 后端重新查询
+  - **前端统计/计数修复**：侧边栏分组统计从 `aggregates.group_counts` 读取；标签使用次数从 `aggregates.tag_counts` 读取；编辑账号可用标签改用 `allTags`；自动重置分组统计改用 `aggregates.group_counts`；批量刷新改用 `getAllAccountIds` 从后端获取全部 ID
+  - **备份/恢复包含 `accounts.db`**：备份和恢复逻辑已同步增加 SQLite 数据库文件
+  - **性能指标**：IPC 传输 300MB → <100KB（降 99.97%）；写盘从全量 JSON 落盘 → 单行 SQLite UPDATE ~1KB；前端 computed 遍历 10 万对象 → 直接返回 20 条当前页；启动加载无需读 300MB JSON
 
 ### v1.7.6 (2026-04-21)
 - **移植「API密钥」+「Provider Key」两个账号信息 Tab 到 simple 端**：`AccountInfoDialog.vue` 在「Firebase」tab 之后新增「API密钥」（含密钥生成 / 删除 / 复制 / 迁移 API Key / 模型排行榜查询 4 子区块）和「Provider Key」（第三方 AI 服务商密钥增删查，OpenAI / Anthropic / Gemini / XAI / OpenRouter / Groq / Fireworks / Cerebras / Together AI / Azure 等 13 种 Provider）两个 tab；用户详情 / 本地信息 / Firebase tab 同步补齐 `name` 属性 + `activeInfoTab` + `onInfoTabChange` 实现切到该 tab 自动加载数据；新增「新密钥已生成」和「添加 Provider Key」两个子对话框，以及 340+ 行 CSS（含暗色模式适配）

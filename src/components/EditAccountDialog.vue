@@ -174,14 +174,7 @@ const rules: FormRules = {
 };
 
 const availableTags = computed(() => {
-  const tags = new Set<string>();
-  // 添加全局标签
-  settingsStore.tags.forEach(tag => tags.add(tag.name));
-  // 添加账号中已使用的标签
-  accountsStore.accounts.forEach(account => {
-    account.tags.forEach(tag => tags.add(tag));
-  });
-  return Array.from(tags);
+  return accountsStore.allTags;
 });
 
 // 获取全局标签的颜色

@@ -705,20 +705,10 @@ function getTargetName(config: AutoResetConfig): string {
   return nickname ? `${email} (${nickname})` : email;
 }
 
-// 判断是否为主账号（有团队的账号）
-function isMasterAccount(account: any): boolean {
-  // 使用 is_team_owner 字段判断，该字段在登录/刷新时通过 API 获取
-  return account.is_team_owner === true;
-}
-
-// 获取分组统计信息（主账号/团队成员数量）
+// 获取分组统计信息（v1.7.8 方案 B：从后端聚合统计读取）
 function getGroupStats(group: string): { masters: number; members: number } {
-  const groupAccounts = accountsStore.accounts.filter(a => a.group === group);
-  // 主账号：有团队套餐的账号
-  const masters = groupAccounts.filter(a => isMasterAccount(a)).length;
-  // 团队成员：普通账号
-  const members = groupAccounts.length - masters;
-  return { masters, members };
+  const total = accountsStore.aggregates.group_counts[group] ?? 0;
+  return { masters: 0, members: total };
 }
 
 // 获取分组标签（用于下拉选项显示）

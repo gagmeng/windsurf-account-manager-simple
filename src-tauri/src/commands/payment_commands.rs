@@ -933,8 +933,8 @@ pub async fn close_payment_window(app: AppHandle) -> Result<(), String> {
 pub async fn get_trial_payment_link_enhanced(
     app: AppHandle,
     data_store: State<'_, Arc<DataStore>>,
+    id: String,
     account_name: String,
-    token: String,
     auto_open: bool,
     teams_tier: i32,
     payment_period: i32,
@@ -943,11 +943,13 @@ pub async fn get_trial_payment_link_enhanced(
     seat_count: Option<i32>,
     turnstile_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    // 获取WindsurfService实例
-    let service = crate::services::windsurf_service::WindsurfService::new();
+    // 从 SQLite 读取完整账号，构造正确的 AuthContext（Firebase/Devin 自动区分）
+    let uuid = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let mut account = data_store.get_account(uuid).await.map_err(|e| e.to_string())?;
+    crate::commands::api_commands::ensure_valid_token(&data_store, &mut account, uuid).await?;
+    let ctx = crate::services::AuthContext::from_account(&account).map_err(|e| e.to_string())?;
 
-    // 前端传入的 token 是 Firebase idToken（Devin 账号走独立的前端入口），这里构造 Firebase AuthContext
-    let ctx = crate::services::AuthContext::firebase(token.clone());
+    let service = crate::services::windsurf_service::WindsurfService::new();
 
     // 调用subscribe_to_plan方法获取支付链接
     let result = service.subscribe_to_plan(

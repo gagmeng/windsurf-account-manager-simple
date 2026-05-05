@@ -1109,7 +1109,10 @@ const activeInfoTab = ref('user-details');
 // 标签页切换时自动加载数据
 function onInfoTabChange(tabName: string) {
   if (tabName === 'api-keys') {
-    loadApiKeys();
+    // Devin 账号使用 session_token 作为 API Key，不调用 Firebase 专用的 GetApiKeySummary
+    if (!isDevinAccount.value) {
+      loadApiKeys();
+    }
   } else if (tabName === 'provider-keys') {
     loadProviderKeys();
   }

@@ -106,8 +106,10 @@ pub async fn get_stats(
     store: State<'_, Arc<DataStore>>,
 ) -> Result<serde_json::Value, String> {
     let config = store.config.read().await;
-    let accounts = &config.accounts;
-    let logs = &config.logs;
+    // v1.7.8 方案 B：从 SQLite 读取账号数据（config.accounts 迁移后已清空）
+    let all_accounts = store.account_store.get_all_accounts().unwrap_or_default();
+    let accounts = &all_accounts;
+    let logs = store.get_logs(None).await.unwrap_or_default();
     
     // 统计成功和失败的操作
     let successful_operations = logs.iter()
@@ -131,6 +133,75 @@ pub async fn get_stats(
     // 获取最后操作时间
     let last_operation = logs.last().map(|log| &log.timestamp);
     
+    // 订阅类型统计
+    let mut plan_stats: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    for account in accounts.iter() {
+        let plan = account.plan_name.clone().unwrap_or_else(|| "未知".to_string());
+        *plan_stats.entry(plan).or_insert(0) += 1;
+    }
+    
+    // 订阅状态统计
+    let active_subscriptions = accounts.iter()
+        .filter(|a| a.subscription_active == Some(true))
+        .count();
+    let inactive_subscriptions = accounts.iter()
+        .filter(|a| a.subscription_active == Some(false))
+        .count();
+    
+    // 团队所有者统计
+    let team_owners = accounts.iter()
+        .filter(|a| a.is_team_owner == Some(true))
+        .count();
+    
+    // 禁用账号统计
+    let disabled_accounts = accounts.iter()
+        .filter(|a| a.is_disabled == Some(true))
+        .count();
+    
+    // 配额统计
+    let mut total_used_quota: i64 = 0;
+    let mut total_quota: i64 = 0;
+    let mut accounts_with_quota = 0;
+    for account in accounts.iter() {
+        if let (Some(used), Some(total)) = (account.used_quota, account.total_quota) {
+            total_used_quota += used as i64;
+            total_quota += total as i64;
+            accounts_with_quota += 1;
+        }
+    }
+    
+    // 标签统计
+    let mut tag_stats: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    for account in accounts.iter() {
+        for tag in &account.tags {
+            *tag_stats.entry(tag.clone()).or_insert(0) += 1;
+        }
+    }
+    
+    // 分组统计
+    let mut group_stats: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    for account in accounts.iter() {
+        let group = account.group.clone().unwrap_or_else(|| "默认分组".to_string());
+        *group_stats.entry(group).or_insert(0) += 1;
+    }
+    
+    // 有Token的账号数
+    let accounts_with_token = accounts.iter()
+        .filter(|a| a.token.is_some() && !a.token.as_ref().unwrap().is_empty())
+        .count();
+    
+    // 有Refresh Token的账号数
+    let accounts_with_refresh_token = accounts.iter()
+        .filter(|a| a.refresh_token.is_some() && !a.refresh_token.as_ref().unwrap().is_empty())
+        .count();
+    
+    // 操作类型统计
+    let mut operation_type_stats: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    for log in logs.iter() {
+        let op_type = format!("{:?}", log.operation_type);
+        *operation_type_stats.entry(op_type).or_insert(0) += 1;
+    }
+    
     Ok(serde_json::json!({
         "total_accounts": accounts.len(),
         "active_accounts": accounts.iter().filter(|a| matches!(a.status, crate::models::AccountStatus::Active)).count(),
@@ -144,7 +215,21 @@ pub async fn get_stats(
         "reset_success_rate": if reset_count == 0 { 0.0 } else { successful_resets as f64 / reset_count as f64 * 100.0 },
         "last_operation": last_operation,
         "groups": config.groups.len(),
-        "settings": &config.settings
+        "settings": &config.settings,
+        "plan_stats": plan_stats,
+        "active_subscriptions": active_subscriptions,
+        "inactive_subscriptions": inactive_subscriptions,
+        "team_owners": team_owners,
+        "disabled_accounts": disabled_accounts,
+        "total_used_quota": total_used_quota,
+        "total_quota": total_quota,
+        "accounts_with_quota": accounts_with_quota,
+        "tag_stats": tag_stats,
+        "group_stats": group_stats,
+        "accounts_with_token": accounts_with_token,
+        "accounts_with_refresh_token": accounts_with_refresh_token,
+        "operation_type_stats": operation_type_stats,
+        "tags_count": config.tags.len()
     }))
 }
 

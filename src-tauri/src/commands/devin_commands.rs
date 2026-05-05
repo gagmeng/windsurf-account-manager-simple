@@ -119,12 +119,8 @@ pub async fn add_account_by_devin_session_token(
         .ok_or_else(|| "GetCurrentUser 响应未找到 email，无法建立账号".to_string())?
         .to_string();
 
-    // 已存在检查（邮箱不区分大小写）
-    let existing = store.get_all_accounts().await.map_err(|e| e.to_string())?;
-    if existing
-        .iter()
-        .any(|acc| acc.email.to_lowercase() == email.to_lowercase())
-    {
+    // 已存在检查（SQLite 精准查询，替代全量 get_all_accounts 遍历）
+    if store.account_store.email_exists(&email).unwrap_or(false) {
         return Err(format!("账号 {} 已存在", email));
     }
 
@@ -136,9 +132,10 @@ pub async fn add_account_by_devin_session_token(
         })
         .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
 
+    // v1.7.8 批量导入性能修复：_no_save 变体 + 末尾 request_save_coalesced 合并落盘
     // session_token 迁入场景无原始密码，password 字段留空
     let mut account = store
-        .add_account(email.clone(), String::new(), final_nickname)
+        .add_account_no_save(email.clone(), String::new(), final_nickname)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -160,7 +157,7 @@ pub async fn add_account_by_devin_session_token(
     enrich_account_with_plan_status(&mut account, &token_trimmed).await;
 
     store
-        .update_account(account.clone())
+        .update_account_no_save(account.clone())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -171,6 +168,9 @@ pub async fn add_account_by_devin_session_token(
     )
     .with_account(account.id, email.clone());
     let _ = store.add_log(log).await;
+
+    // v1.7.8 批量导入性能修复：统一触发一次合并落盘（非阻塞）
+    store.inner().request_save_coalesced();
 
     Ok(json!({
         "success": true,
@@ -384,25 +384,15 @@ pub async fn add_account_by_devin_login(
         }));
     }
 
-    // 已存在检查
-    let existing = store
-        .get_all_accounts()
-        .await
-        .map_err(|e| e.to_string())?;
-    if existing
-        .iter()
-        .any(|acc| acc.email.to_lowercase() == email.to_lowercase())
-    {
-        return Err(format!("账号 {} 已存在", email));
-    }
 
     // Step 3: 创建账号骨架
     let final_nickname = nickname
         .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
 
+    // v1.7.8 批量导入性能修复：_no_save 变体 + 末尾 request_save_coalesced 合并落盘
     // 直接将用户输入的账密 password 落库，保证后续账号卡可始终回显、完整导出
     let mut account = store
-        .add_account(email.clone(), password.clone(), final_nickname)
+        .add_account_no_save(email.clone(), password.clone(), final_nickname)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -426,7 +416,7 @@ pub async fn add_account_by_devin_login(
     enrich_account_with_user_info(&mut account, &login.session_token).await;
 
     store
-        .update_account(account.clone())
+        .update_account_no_save(account.clone())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -438,6 +428,80 @@ pub async fn add_account_by_devin_login(
     )
     .with_account(account.id, email.clone());
     let _ = store.add_log(log).await;
+
+    // v1.7.8 批量导入性能修复：统一触发一次合并落盘（非阻塞）
+    store.inner().request_save_coalesced();
+
+    Ok(json!({
+        "success": true,
+        "requires_org_selection": false,
+        "account": account,
+        "email": email,
+        "plan_name": account.plan_name,
+        "used_quota": account.used_quota,
+        "total_quota": account.total_quota,
+        "devin_account_id": account.devin_account_id,
+        "primary_org_id": account.devin_primary_org_id,
+    }))
+}
+
+/// **Devin 原生账密登录 + 建账号**（v1.7.6 新增，与 `add_account_by_devin_login` 对称）
+///
+/// 关键差异：
+/// - 端口：`https://app.devin.ai/api/auth1/password/login`（**Devin 原生侧**）
+///   而非 `https://windsurf.com/_devin-auth/password/login`（Windsurf 桥接侧）
+/// - 适用场景：`sniff_login_method` 判定 `recommended="devin_native"` 的纯 Devin 原生账号
+///
+/// 行为：
+/// 1. `login_with_devin_native_password` 得到 Devin 原生侧 auth1_token
+/// 2. 内部调 `WindsurfPostAuth(auth1_token, org_id="")` 换取 session_token + orgs
+/// 3. 若 orgs > 1 且未传 org_id，返回 `requires_org_selection=true`，由 UI 二次选择
+/// 4. 否则拉取用户信息并持久化账号（`auth_provider="devin"`，与 Windsurf 桥接侧登录落库字段保持一致）
+#[tauri::command]
+pub async fn add_account_by_devin_native_login(
+    email: String,
+    password: String,
+    nickname: Option<String>,
+    tags: Vec<String>,
+    group: Option<String>,
+    org_id: Option<String>,
+    store: State<'_, Arc<DataStore>>,
+) -> Result<serde_json::Value, String> {
+    let auth = DevinAuthService::new();
+
+    // Step 1+2: Devin 原生侧登录 → auth1_token → WindsurfPostAuth → session_token
+    let login = auth
+        .login_with_devin_native_password(&email, &password, org_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 多组织分支：要求 UI 二次选择（与 add_account_by_devin_login 一致）
+    if login.requires_org_selection {
+        return Ok(json!({
+            "success": false,
+            "requires_org_selection": true,
+            "auth1_token": login.auth1_token,
+            "orgs": login.orgs,
+            "email": email,
+            "message": "检测到多个组织，请选择一个继续"
+        }));
+    }
+
+    // 复用统一持久化函数，保证字段落库语义与其他 Devin 命令一致
+    let account = persist_devin_account_from_login_result(
+        &store,
+        &email,
+        &password,
+        nickname,
+        tags,
+        group,
+        &login,
+        &format!("通过 Devin 原生账密添加账号: {}", email),
+    )
+    .await?;
+
+    // v1.7.8 批量导入性能修复：persist 使用 _no_save 变体，本命令统一触发合并落盘
+    store.inner().request_save_coalesced();
 
     Ok(json!({
         "success": true,
@@ -475,25 +539,15 @@ pub async fn add_account_by_devin_with_org(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 已存在检查
-    let existing = store
-        .get_all_accounts()
-        .await
-        .map_err(|e| e.to_string())?;
-    if existing
-        .iter()
-        .any(|acc| acc.email.to_lowercase() == email.to_lowercase())
-    {
-        return Err(format!("账号 {} 已存在", email));
-    }
 
     let final_nickname = nickname
         .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
 
+    // v1.7.8 批量导入性能修复：_no_save 变体 + 末尾 request_save_coalesced 合并落盘
     // 同 add_account_by_devin_login：将用户原始密码落库，无密场景传 None 则保留空字段
     let stored_password = password.clone().unwrap_or_default();
     let mut account = store
-        .add_account(email.clone(), stored_password, final_nickname)
+        .add_account_no_save(email.clone(), stored_password, final_nickname)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -518,7 +572,7 @@ pub async fn add_account_by_devin_with_org(
     enrich_account_with_user_info(&mut account, &post_auth.session_token).await;
 
     store
-        .update_account(account.clone())
+        .update_account_no_save(account.clone())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -529,6 +583,9 @@ pub async fn add_account_by_devin_with_org(
     )
     .with_account(account.id, email.clone());
     let _ = store.add_log(log).await;
+
+    // v1.7.8 批量导入性能修复：统一触发一次合并落盘（非阻塞）
+    store.inner().request_save_coalesced();
 
     Ok(json!({
         "success": true,
@@ -597,6 +654,9 @@ pub async fn add_account_by_devin_register(
         &format!("通过 Devin 邮箱注册添加账号: {}", email),
     )
     .await?;
+
+    // v1.7.8 批量导入性能修复：persist 使用 _no_save 变体，本命令统一触发合并落盘
+    store.inner().request_save_coalesced();
 
     Ok(json!({
         "success": true,
@@ -677,6 +737,9 @@ pub async fn add_account_by_devin_native_register(
     )
     .await?;
 
+    // v1.7.8 批量导入性能修复：persist 使用 _no_save 变体，本命令统一触发合并落盘
+    store.inner().request_save_coalesced();
+
     Ok(json!({
         "success": true,
         "requires_org_selection": false,
@@ -735,6 +798,9 @@ pub async fn add_account_by_devin_email_login(
         &format!("通过 Devin 邮件验证码登录添加账号: {}", email),
     )
     .await?;
+
+    // v1.7.8 批量导入性能修复：persist 使用 _no_save 变体，本命令统一触发合并落盘
+    store.inner().request_save_coalesced();
 
     Ok(json!({
         "success": true,
@@ -1091,12 +1157,8 @@ pub async fn add_account_by_devin_auth1_token(
         }));
     }
 
-    // Step 4: 落库 —— 已存在检查（邮箱不区分大小写）
-    let existing = store.get_all_accounts().await.map_err(|e| e.to_string())?;
-    if existing
-        .iter()
-        .any(|acc| acc.email.to_lowercase() == email.to_lowercase())
-    {
+    // Step 4: 落库 —— 已存在检查（SQLite 精准查询）
+    if store.account_store.email_exists(&email).unwrap_or(false) {
         return Err(format!("账号 {} 已存在", email));
     }
 
@@ -1108,9 +1170,10 @@ pub async fn add_account_by_devin_auth1_token(
         })
         .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
 
+    // v1.7.8 批量导入性能修复：_no_save 变体 + 末尾 request_save_coalesced 合并落盘
     // auth1_token 迁入场景无原始密码，password 字段留空
     let mut account = store
-        .add_account(email.clone(), String::new(), final_nickname)
+        .add_account_no_save(email.clone(), String::new(), final_nickname)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1144,7 +1207,7 @@ pub async fn add_account_by_devin_auth1_token(
     enrich_account_with_plan_status(&mut account, &ctx.token).await;
 
     store
-        .update_account(account.clone())
+        .update_account_no_save(account.clone())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1155,6 +1218,9 @@ pub async fn add_account_by_devin_auth1_token(
     )
     .with_account(account.id, email.clone());
     let _ = store.add_log(log).await;
+
+    // v1.7.8 批量导入性能修复：统一触发一次合并落盘（非阻塞）
+    store.inner().request_save_coalesced();
 
     Ok(json!({
         "success": true,
@@ -1201,8 +1267,11 @@ pub(crate) async fn persist_devin_account_from_login_result(
     let final_nickname = nickname
         .unwrap_or_else(|| email.split('@').next().unwrap_or(email).to_string());
 
+    // v1.7.8 批量导入性能修复：辅助函数用 _no_save 变体，由每个调用方在其命令末尾
+    // 调用 `store.inner().request_save_coalesced()` 统一触发合并落盘。
+    // 辅助函数签名 `&DataStore` 拿不到 Arc<Self>，无法直接 request_save_coalesced。
     let mut account = store
-        .add_account(email.to_string(), password.to_string(), final_nickname)
+        .add_account_no_save(email.to_string(), password.to_string(), final_nickname)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1225,7 +1294,7 @@ pub(crate) async fn persist_devin_account_from_login_result(
     enrich_account_with_user_info(&mut account, &login.session_token).await;
 
     store
-        .update_account(account.clone())
+        .update_account_no_save(account.clone())
         .await
         .map_err(|e| e.to_string())?;
 

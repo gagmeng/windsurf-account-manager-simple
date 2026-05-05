@@ -136,6 +136,12 @@ pub struct Settings {
     pub team_name: String,  // Teams 计划的团队名称
     #[serde(default = "default_seat_count", rename = "seatCount")]
     pub seat_count: i32,  // Teams 计划的席位数量
+    #[serde(default = "default_true", rename = "autoBackupEnabled")]
+    pub auto_backup_enabled: bool,  // 是否启用自动备份
+    #[serde(default = "default_backup_interval", rename = "backupInterval")]
+    pub backup_interval: i32,  // 自动备份间隔（分钟）
+    #[serde(default = "default_backup_max_count", rename = "backupMaxCount")]
+    pub backup_max_count: i32,  // 最大备份数量
 }
 
 fn default_browser_mode() -> String {
@@ -166,6 +172,14 @@ fn default_use_lightweight_api() -> bool {
     true
 }
 
+fn default_backup_interval() -> i32 {
+    10  // 默认10分钟
+}
+
+fn default_backup_max_count() -> i32 {
+    10  // 默认10份
+}
+
 fn default_windsurf_client_type() -> String {
     "windsurf".to_string()
 }
@@ -176,7 +190,7 @@ impl Default for Settings {
             auto_refresh_token: true,
             seat_count_options: vec![18, 19, 20],
             retry_times: 2,
-            theme: "light".to_string(),
+            theme: "aurora".to_string(),
             concurrent_limit: 5,
             show_seats_result_dialog: false,  // 默认关闭
             sort_config: SortConfig::default(),  // 默认自定义排序
@@ -207,6 +221,9 @@ impl Default for Settings {
             start_trial: true,  // 默认开启试用
             team_name: String::new(),  // 默认空团队名称
             seat_count: 1,  // 默认1个席位
+            auto_backup_enabled: true,  // 默认启用自动备份
+            backup_interval: 10,  // 默认10分钟
+            backup_max_count: 10,  // 默认最多10份
         }
     }
 }

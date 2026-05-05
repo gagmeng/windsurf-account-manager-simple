@@ -8,7 +8,7 @@ const defaultSettings: Partial<Settings> = {
   auto_refresh_token: true,
   seat_count_options: [18, 19, 20],
   retry_times: 2,
-  theme: 'light',
+  theme: 'aurora',
   concurrent_limit: 5,
   show_seats_result_dialog: false,
   useLightweightApi: true,

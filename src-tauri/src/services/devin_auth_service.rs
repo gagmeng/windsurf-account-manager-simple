@@ -130,17 +130,21 @@ pub struct CheckUserLoginMethodResult {
 
 /// 登录流派崇探聚合结果
 ///
-/// 由 [`DevinAuthService::sniff_login_method`] 生成，同时聚合两侧探测数据：
-/// - Firebase(WS) 侧：`CheckUserLoginMethod`
-/// - Devin 侧：  `/_devin-auth/connections`
+/// 由 [`DevinAuthService::sniff_login_method`] 生成，同时聚合三路探测数据：
+/// - Firebase(WS) 侧：`web-backend.windsurf.com / CheckUserLoginMethod`
+/// - Windsurf 同源桥接侧：`windsurf.com/_devin-auth/connections`
+/// - **Devin 原生侧**：`app.devin.ai/api/auth1/connections`（v1.7.6 新增）
 ///
-/// `recommended` 字段取值与含义（与官网 reducer BOTH_CHECKS_DONE 对齐）：
-/// - `"firebase"`    — 老 Firebase 账号 + 已设密码，走 `signInWithEmailAndPassword`
-/// - `"devin"`       — 已迁移或新 Auth1 账号，走 Devin 账密登录
-/// - `"sso"`         — 挂接企业 SSO 连接，必须在浏览器中完成 SSO 跳转
-/// - `"no_password"` — 老账号仅用过 Google/GitHub，需用 OAuth 或先重置密码
-/// - `"not_found"`   — 邮箱两侧都不存在，建议先注册
-/// - `"blocked"`     — 企业用户被限制普通登录通道
+/// `recommended` 字段取值与含义：
+/// - `"firebase"`                — 老 Firebase 账号 + 已设密码，走 `signInWithEmailAndPassword`
+/// - `"devin"`                   — 已迁移或新 Auth1 账号，走 Windsurf 桥接侧 Devin 账密登录
+/// - `"devin_native"`            — **纯 Devin 原生账号**（只在 app.devin.ai 侧存在）且已设密码，走
+///                                  `app.devin.ai/api/auth1/password/login` 登录（v1.7.6 新增）
+/// - `"devin_native_no_password"` — **纯 Devin 原生账号**但未设密码，需改用邮箱验证码登录
+/// - `"sso"`                     — 挂接企业 SSO 连接，必须在浏览器中完成 SSO 跳转
+/// - `"no_password"`             — 老账号仅用过 Google/GitHub，需用 OAuth 或先重置密码
+/// - `"not_found"`               — 邮箱三侧都不存在，建议先注册
+/// - `"blocked"`                 — 企业用户被限制普通登录通道
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LoginMethodSniffResult {
     /// 建议的登录流派
@@ -155,15 +159,23 @@ pub struct LoginMethodSniffResult {
     pub redirect_url: Option<String>,
     pub disallow_enterprise: bool,
 
-    // ==== Devin 侧原始判定 ====
-    /// Devin `/connections` 返回的原始 JSON，接口失败/邮箱不存在时为 `None`
+    // ==== Windsurf 桥接侧原始判定（windsurf.com/_devin-auth/connections）====
+    /// Windsurf 桥接侧 `/connections` 的原始 JSON，接口失败/邮箱不存在时为 `None`
     pub devin_connections: Option<serde_json::Value>,
-    /// Devin 侧 `method` 字段：`"auth1"` | `"not_found"` | null
+    /// Windsurf 桥接侧 `auth_method.method` 字段：`"auth1"` | `"not_found"` | null
     pub devin_method: Option<String>,
-    /// Devin 侧 `has_password` 字段
+    /// Windsurf 桥接侧 `auth_method.has_password` 字段
     pub devin_has_password: Option<bool>,
-    /// Devin 侧 `sso_connections` 数组是否非空
+    /// Windsurf 桥接侧 `auth_method.sso_connections` 数组是否非空
     pub has_sso_connection: bool,
+
+    // ==== Devin 原生侧原始判定（app.devin.ai/api/auth1/connections，v1.7.6 新增）====
+    /// Devin 原生侧 `/connections` 的原始 JSON，接口失败/邮箱不存在时为 `None`
+    pub devin_native_connections: Option<serde_json::Value>,
+    /// Devin 原生侧 `auth_method.method` 字段
+    pub devin_native_method: Option<String>,
+    /// Devin 原生侧 `auth_method.has_password` 字段
+    pub devin_native_has_password: Option<bool>,
 }
 
 /// 完整登录流程的最终结果
@@ -393,6 +405,7 @@ impl DevinAuthService {
             .header("sec-fetch-dest", "empty")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-site")
+            .header("X-Devin-Auth1-Token", auth1_token)
             .send()
             .await
             .map_err(|e| {
@@ -495,72 +508,88 @@ impl DevinAuthService {
         parse_check_user_login_method_response(&bytes)
     }
 
-    /// 聚合崇探：并发调 Firebase `CheckUserLoginMethod` + Devin `/_devin-auth/connections`，
-    /// 给出统一登录流派建议。
+    /// 聚合崇探：并发调 Firebase `CheckUserLoginMethod` + Windsurf 桥接 `/_devin-auth/connections` +
+    /// Devin 原生 `/api/auth1/connections`，给出统一登录流派建议。
     ///
-    /// 决策优先级（完全对齐官网 reducer `BOTH_CHECKS_DONE`）：
+    /// 决策优先级：
     /// 1. `disallow_enterprise_user_login == true` → `blocked`
-    /// 2. Devin 侧 `sso_connections[]` 非空 且 WS 侧 `!is_migrated` → `sso`
+    /// 2. Windsurf 桥接侧 `sso_connections[]` 非空 且 WS 侧 `!is_migrated` → `sso`
     /// 3. WS `user_exists && !is_migrated`:
     ///    - `has_password` → `firebase`
     ///    - `!has_password` → `no_password`
-    /// 4. Devin `method == "auth1"` 或 WS `is_migrated` → `devin`
-    /// 5. 两侧都不存在 → `not_found`
+    /// 4. Windsurf 桥接侧 `method == "auth1"` 或 WS `is_migrated` → `devin`
+    /// 5. **Devin 原生侧** `method == "auth1"`（v1.7.6 新增）：
+    ///    - `has_password == true` → `devin_native`
+    ///    - `has_password != true` → `devin_native_no_password`
+    /// 6. 三路都不存在 → `not_found`
     ///
-    /// Devin 侧不可用（网络异常 / 4xx）时仅基于 Firebase 侧判定，保证可用性。
+    /// 桥接侧 / 原生侧不可用（网络异常 / 4xx）时只会加速降级为 `not_found`，不会出现 panic。
     pub async fn sniff_login_method(&self, email: &str) -> AppResult<LoginMethodSniffResult> {
-        // 两侧探测并发：Firebase 侧必须成功；Devin 侧允许失败
-        let (ws_result, devin_result) =
-            tokio::join!(self.check_user_login_method(email), self.check_connections(email));
+        // 三路探测并发：Firebase 侧必须成功；两个 Devin 侧允许失败
+        let (ws_result, bridge_result, native_result) = tokio::join!(
+            self.check_user_login_method(email),
+            self.check_connections(email),
+            self.devin_app_check_connections(email),
+        );
 
         let ws = ws_result?;
-        let connections = devin_result.ok();
+        let bridge_conn = bridge_result.ok();
+        let native_conn = native_result.ok();
 
-        // 从 Devin connections 响应里抽出关键字段
-        //
-        // 官网前端实际取的是 `connections.auth_method` 子对象（见官网 chunk 1635：
-        //   `let [e, n] = await Promise.all([et(r), Wk("windsurf", r)]);`
-        //   `let o = n.auth_method ?? null;`
-        //   `dispatch({ type: "BOTH_CHECKS_DONE", wsResult: e, devinResult: o })`
-        // ）。所以 `method` / `has_password` / `sso_connections` 三个字段都挂在 `auth_method`
-        // 子对象下。早期直接从 raw 顶层取会导致 Devin 侧永远读不到 → 被误判为 `not_found`。
-        //
-        // 兼容性兜底：若后端新版本把字段平铺到顶层，也能读到（先 auth_method 再 raw 顶层）。
-        let (devin_method, devin_has_password, has_sso_connection, devin_raw) = match &connections
-        {
-            Some(conn) => {
-                let raw = &conn.raw;
-                let auth_method = raw.get("auth_method");
+        // 共用的字段抽取辅助：官网前端实际取的是 `connections.auth_method` 子对象，
+        // 否则回退到 raw 顶层（兼容字段平铺的后端版本）。
+        let extract_connection_fields = |conn: Option<&ConnectionsResponse>| -> (
+            Option<String>,
+            Option<bool>,
+            bool,
+            Option<serde_json::Value>,
+        ) {
+            match conn {
+                Some(c) => {
+                    let raw = &c.raw;
+                    let auth_method = raw.get("auth_method");
 
-                let read_str = |key: &str| {
-                    auth_method
-                        .and_then(|v| v.get(key))
-                        .or_else(|| raw.get(key))
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                };
-                let read_bool = |key: &str| {
-                    auth_method
-                        .and_then(|v| v.get(key))
-                        .or_else(|| raw.get(key))
-                        .and_then(|v| v.as_bool())
-                };
-                let read_array_non_empty = |key: &str| -> bool {
-                    auth_method
-                        .and_then(|v| v.get(key))
-                        .or_else(|| raw.get(key))
-                        .and_then(|v| v.as_array())
-                        .map(|arr| !arr.is_empty())
-                        .unwrap_or(false)
-                };
+                    let read_str = |key: &str| {
+                        auth_method
+                            .and_then(|v| v.get(key))
+                            .or_else(|| raw.get(key))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    };
+                    let read_bool = |key: &str| {
+                        auth_method
+                            .and_then(|v| v.get(key))
+                            .or_else(|| raw.get(key))
+                            .and_then(|v| v.as_bool())
+                    };
+                    let read_array_non_empty = |key: &str| -> bool {
+                        auth_method
+                            .and_then(|v| v.get(key))
+                            .or_else(|| raw.get(key))
+                            .and_then(|v| v.as_array())
+                            .map(|arr| !arr.is_empty())
+                            .unwrap_or(false)
+                    };
 
-                let method = read_str("method");
-                let has_password = read_bool("has_password");
-                let sso_present = read_array_non_empty("sso_connections");
-                (method, has_password, sso_present, Some(raw.clone()))
+                    (
+                        read_str("method"),
+                        read_bool("has_password"),
+                        read_array_non_empty("sso_connections"),
+                        Some(raw.clone()),
+                    )
+                }
+                None => (None, None, false, None),
             }
-            None => (None, None, false, None),
         };
+
+        // 桥接侧（windsurf.com/_devin-auth/connections）
+        let (devin_method, devin_has_password, has_sso_connection, devin_raw) =
+            extract_connection_fields(bridge_conn.as_ref());
+
+        // Devin 原生侧（app.devin.ai/api/auth1/connections）
+        // 原生侧不存在 `sso_connections` 概念，返回的 bool 丢弃。
+        let (devin_native_method, devin_native_has_password, _native_sso, devin_native_raw) =
+            extract_connection_fields(native_conn.as_ref());
 
         let (recommended, reason): (&str, String) = if ws.disallow_enterprise_user_login {
             (
@@ -588,10 +617,27 @@ impl DevinAuthService {
         } else if ws.is_migrated || devin_method.as_deref() == Some("auth1") {
             (
                 "devin",
-                "已迁移或新 Auth1 账号，走 Devin 账密登录".to_string(),
+                "已迁移或新 Auth1 账号，走 Devin 账密登录（Windsurf 桥接）".to_string(),
             )
+        } else if devin_native_method.as_deref() == Some("auth1") {
+            // v1.7.6 新增：纯 Devin 原生账号（在 Firebase + Windsurf 桥接两侧都查不到，
+            // 仅在 app.devin.ai 侧有注册记录）
+            if devin_native_has_password == Some(true) {
+                (
+                    "devin_native",
+                    "Devin 原生账号（app.devin.ai），走原生侧密码登录".to_string(),
+                )
+            } else {
+                (
+                    "devin_native_no_password",
+                    "Devin 原生账号（app.devin.ai）未设密码，请改用邮箱验证码登录"
+                        .to_string(),
+                )
+            }
         } else if !ws.user_exists
             && (devin_method.is_none() || devin_method.as_deref() == Some("not_found"))
+            && (devin_native_method.is_none()
+                || devin_native_method.as_deref() == Some("not_found"))
         {
             (
                 "not_found",
@@ -620,6 +666,9 @@ impl DevinAuthService {
             devin_method,
             devin_has_password,
             has_sso_connection,
+            devin_native_connections: devin_native_raw,
+            devin_native_method,
+            devin_native_has_password,
         })
     }
 
@@ -1139,6 +1188,59 @@ impl DevinAuthService {
         })
     }
 
+    /// Devin 原生侧密码登录（v1.7.6 新增）
+    ///
+    /// 端点：`POST https://app.devin.ai/api/auth1/password/login`
+    /// 请求体：`{"email":"...","password":"..."}`
+    /// 响应：`{"token":"auth1_<52>","user_id":"user-<32>","email":"..."}`，结构与 Windsurf 桥接侧一致
+    ///
+    /// 与 `password_login`（Windsurf 桥接侧）的关键差异：
+    /// - 本方法走 `app.devin.ai/api/auth1/*`，用于**纯 Devin 原生账号**的登录
+    /// - Windsurf 桥接侧 `password_login` 查不到纯 Devin 原生账号（因为 windsurf.com 侧没有对应的 user 记录）
+    /// - 调用方应根据 `sniff_login_method.recommended` 的结果选择走哪个端口
+    ///
+    /// 错误翻译复用 `parse_password_login_error`（与 Windsurf 桥接侧保持一致）。
+    pub async fn devin_app_password_login(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> AppResult<PasswordLoginResponse> {
+        let url = format!("{}/password/login", DEVIN_APP_AUTH_BASE_URL);
+
+        let body = PasswordLoginRequest {
+            email: email.to_string(),
+            password: password.to_string(),
+        };
+
+        let response = Self::apply_devin_app_headers(self.client.post(&url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                super::report_request_failure();
+                AppError::Network(format!("Devin App 登录请求失败: {}", e))
+            })?;
+
+        super::report_request_success();
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| AppError::Network(e.to_string()))?;
+
+        if !status.is_success() {
+            return Err(Self::parse_password_login_error(status.as_u16(), &text));
+        }
+
+        serde_json::from_str::<PasswordLoginResponse>(&text).map_err(|e| {
+            AppError::Parse(format!(
+                "解析 Devin App 登录响应失败: {}. Body: {}",
+                e, text
+            ))
+        })
+    }
+
     /// Devin 原生注册 + 桥接到 Windsurf 的完整流程组合
     ///
     /// 步骤：
@@ -1161,6 +1263,27 @@ impl DevinAuthService {
             .devin_app_email_complete(email_verification_token, code, "signup")
             .await?;
         self.post_auth_to_login_result(complete, org_id).await
+    }
+
+    /// Devin 原生侧完整密码登录流程（v1.7.6 新增）
+    ///
+    /// 步骤：
+    /// 1. `devin_app_password_login(email, password)` → 得 Devin 原生侧 auth1_token
+    /// 2. `WindsurfPostAuth(auth1_token, org_id)` → 换取 Windsurf session_token
+    /// 3. 组装 `DevinLoginResult`
+    ///
+    /// 与 `login_with_password`（Windsurf 桥接侧）对称，两者共享同一个 `post_auth_to_login_result`
+    /// 进行 auth1 → session 的转换，仅登录的第一步走的端口不同。
+    ///
+    /// 适用场景：纯 Devin 原生账号（`sniff_login_method` 返回 `recommended=devin_native`）
+    pub async fn login_with_devin_native_password(
+        &self,
+        email: &str,
+        password: &str,
+        org_id: Option<&str>,
+    ) -> AppResult<DevinLoginResult> {
+        let login = self.devin_app_password_login(email, password).await?;
+        self.post_auth_to_login_result(login, org_id).await
     }
 
     // ==================== 错误翻译（接续 Windsurf 侧的错误翻译区） ====================
