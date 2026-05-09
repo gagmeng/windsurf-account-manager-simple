@@ -47,6 +47,10 @@ serde_urlencoded = "0.7"
 rusqlite = { version = "0.31", features = ["bundled"] }
 regex = "1.10"
 zip = "0.6"
+# 外部 HTTP API（仅内部使用，监听地址/端口在 Settings 里配置）
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

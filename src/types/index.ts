@@ -511,6 +511,9 @@ export interface Settings {
   startTrial?: boolean;  // 是否以试用方式开始订阅
   teamName?: string;  // Teams 计划的团队名称
   seatCount?: number;  // Teams 计划的席位数量
+  apiEnabled?: boolean;  // 启用外部 HTTP API
+  apiHost?: string;  // 外部 API 监听地址
+  apiPort?: number;  // 外部 API 监听端口
 }
 
 /**

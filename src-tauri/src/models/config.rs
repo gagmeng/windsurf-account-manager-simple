@@ -142,6 +142,17 @@ pub struct Settings {
     pub backup_interval: i32,  // 自动备份间隔（分钟）
     #[serde(default = "default_backup_max_count", rename = "backupMaxCount")]
     pub backup_max_count: i32,  // 最大备份数量
+
+    // ==================== 外部 HTTP API（仅内部使用，无鉴权） ====================
+    /// 是否启动外部 HTTP API 服务，默认关闭
+    #[serde(default, rename = "apiEnabled")]
+    pub api_enabled: bool,
+    /// 监听地址，默认 127.0.0.1（仅本机）
+    #[serde(default = "default_api_host", rename = "apiHost")]
+    pub api_host: String,
+    /// 监听端口，默认 46953
+    #[serde(default = "default_api_port", rename = "apiPort")]
+    pub api_port: u16,
 }
 
 fn default_browser_mode() -> String {
@@ -184,6 +195,14 @@ fn default_windsurf_client_type() -> String {
     "windsurf".to_string()
 }
 
+fn default_api_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_api_port() -> u16 {
+    46953
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -224,6 +243,9 @@ impl Default for Settings {
             auto_backup_enabled: true,  // 默认启用自动备份
             backup_interval: 10,  // 默认10分钟
             backup_max_count: 10,  // 默认最多10份
+            api_enabled: false,  // 默认关闭外部 HTTP API
+            api_host: "127.0.0.1".to_string(),  // 默认仅监听本机
+            api_port: 46953,  // 默认端口
         }
     }
 }

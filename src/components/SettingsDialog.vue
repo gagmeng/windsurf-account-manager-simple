@@ -566,6 +566,81 @@
         </el-form>
       </el-tab-pane>
       
+      <!-- 外部 API 标签页 -->
+      <el-tab-pane label="外部 API" name="api" lazy>
+        <el-form :model="settings" label-width="140px">
+          <el-alert
+            type="info"
+            :closable="false"
+            style="margin-bottom: 16px;"
+          >
+            <template #default>
+              本机 HTTP REST API，仅供同机其它工具调用账号信息（无鉴权，请勿暴露到公网）。
+              修改设置后保存即生效，会自动重启 API 服务。
+            </template>
+          </el-alert>
+
+          <el-form-item label="启用 API 服务">
+            <el-switch
+              v-model="settings.apiEnabled"
+              active-text="开启"
+              inactive-text="关闭"
+            />
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              开启后将在指定地址/端口监听 HTTP 请求
+            </div>
+          </el-form-item>
+
+          <el-form-item label="监听地址" v-if="settings.apiEnabled">
+            <el-input
+              v-model="settings.apiHost"
+              placeholder="127.0.0.1"
+              style="width: 280px;"
+              clearable
+            />
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              <code>127.0.0.1</code> 仅本机访问；<code>0.0.0.0</code> 监听所有网卡（不推荐，无鉴权）
+            </div>
+          </el-form-item>
+
+          <el-form-item label="监听端口" v-if="settings.apiEnabled">
+            <el-input-number
+              v-model="settings.apiPort"
+              :min="1"
+              :max="65535"
+              :step="1"
+              controls-position="right"
+              style="width: 180px;"
+            />
+            <div style="margin-top: 5px; color: #909399; font-size: 12px;">
+              默认 46953，避免与 Vite 开发端口（46952）冲突
+            </div>
+          </el-form-item>
+
+          <el-divider content-position="left">可用接口</el-divider>
+
+          <el-form-item v-if="settings.apiEnabled" label="基础地址">
+            <el-input
+              :model-value="apiBaseUrl"
+              readonly
+              style="width: 360px;"
+            >
+              <template #append>
+                <el-button @click="copyToClipboard(apiBaseUrl)">复制</el-button>
+              </template>
+            </el-input>
+          </el-form-item>
+
+          <el-form-item label="路由列表">
+            <el-table :data="apiRoutes" size="small" border style="width: 100%; max-width: 720px;">
+              <el-table-column prop="method" label="Method" width="80" />
+              <el-table-column prop="path" label="Path" />
+              <el-table-column prop="desc" label="说明" />
+            </el-table>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
       <!-- 备份设置标签页 -->
       <el-tab-pane label="备份设置" name="backup" lazy>
         <el-form :model="settings" label-width="140px">
@@ -744,6 +819,9 @@ const settings = reactive<{
   autoBackupEnabled: boolean;
   backupInterval: number;
   backupMaxCount: number;
+  apiEnabled: boolean;
+  apiHost: string;
+  apiPort: number;
 }>({
   auto_refresh_token: true,
   seat_count_options: [18, 19, 20],
@@ -781,7 +859,31 @@ const settings = reactive<{
   autoBackupEnabled: true,  // 默认启用自动备份
   backupInterval: 10,  // 默认10分钟
   backupMaxCount: 10,  // 默认最多10份
+  apiEnabled: false,  // 默认关闭外部 HTTP API
+  apiHost: '127.0.0.1',  // 默认仅本机
+  apiPort: 46953,  // 默认端口
 });
+
+// ==================== 外部 API 标签页 ====================
+const apiBaseUrl = computed(() => `http://${settings.apiHost}:${settings.apiPort}`);
+
+const apiRoutes = [
+  { method: 'GET', path: '/api/v1/health', desc: '健康检查 + 版本号' },
+  { method: 'GET', path: '/api/v1/accounts', desc: '账号列表（含全部字段，分页/过滤参数同前端）' },
+  { method: 'GET', path: '/api/v1/accounts/:id', desc: '单条账号详情（含 token / refresh_token 等全部字段）' },
+  { method: 'GET', path: '/api/v1/accounts/:id/token?auto_refresh=true', desc: '取有效 access_token（自动刷新）' },
+  { method: 'GET', path: '/api/v1/groups', desc: '分组列表' },
+  { method: 'GET', path: '/api/v1/stats', desc: '聚合统计（同 SQLite aggregates）' },
+];
+
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success('已复制');
+  } catch {
+    ElMessage.error('复制失败');
+  }
+}
 
 // 备份相关
 const backupLoading = ref(false);

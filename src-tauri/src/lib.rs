@@ -3,11 +3,16 @@ mod repository;
 mod services;
 mod commands;
 mod utils;
+mod api;
 
 use repository::DataStore;
 use commands::{AutoResetStore, ResetRecordStore};
 use std::sync::Arc;
 use tauri::Manager;
+use tokio::sync::Mutex as AsyncMutex;
+
+/// 外部 HTTP API 服务句柄。Settings 变化时由 settings_commands 触发停止 + 重启。
+pub type ApiServerState = Arc<AsyncMutex<Option<api::ApiServerHandle>>>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -91,6 +96,42 @@ pub fn run() {
                 let title = format!("windsurf-account-manager-simple v{}", version);
                 window.set_title(&title).ok();
             }
+            
+            // 外部 HTTP API 服务（仅内部使用）：
+            // - 监听地址 / 端口 / 启用状态读自 Settings
+            // - 句柄由 ApiServerState 管理，settings_commands::update_settings 检测到
+            //   api_* 字段变化时调用 commands::settings_commands::restart_api_server 热重启
+            let api_state: ApiServerState = Arc::new(AsyncMutex::new(None));
+            app.manage(api_state.clone());
+            let store_for_api = store.clone();
+            tauri::async_runtime::spawn(async move {
+                let settings = match store_for_api.get_settings().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[API] 读取 Settings 失败，跳过启动：{}", e);
+                        return;
+                    }
+                };
+                if !settings.api_enabled {
+                    println!("[API] 外部 HTTP API 默认关闭（Settings.api_enabled=false）");
+                    return;
+                }
+                match api::start_server(
+                    store_for_api.clone(),
+                    settings.api_host.clone(),
+                    settings.api_port,
+                )
+                .await
+                {
+                    Ok(handle) => {
+                        let mut guard = api_state.lock().await;
+                        *guard = Some(handle);
+                    }
+                    Err(e) => {
+                        eprintln!("[API] 启动失败：{}", e);
+                    }
+                }
+            });
             
             Ok(())
         })

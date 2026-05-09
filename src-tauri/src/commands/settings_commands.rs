@@ -1,5 +1,7 @@
 use crate::models::{Settings, OperationLog, GlobalTag, SortField, SortDirection, SortConfig, Account};
 use crate::repository::{DataStore, ImportResult, BackupInfo};
+use crate::ApiServerState;
+use crate::api;
 use std::sync::Arc;
 use std::path::PathBuf;
 use tauri::State;
@@ -17,6 +19,7 @@ pub async fn get_settings(
 pub async fn update_settings(
     settings: Settings,
     store: State<'_, Arc<DataStore>>,
+    api_state: State<'_, ApiServerState>,
 ) -> Result<(), String> {
     // 检查配置变化
     let old_settings = store.get_settings().await.map_err(|e| e.to_string())?;
@@ -36,10 +39,41 @@ pub async fn update_settings(
     if old_settings.use_lightweight_api != settings.use_lightweight_api {
         println!("[Settings] Lightweight API config changed: {}", settings.use_lightweight_api);
     }
-    
+
+    // 外部 HTTP API 配置变化：启停 / 改地址 / 改端口都触发热重启
+    let api_changed = old_settings.api_enabled != settings.api_enabled
+        || old_settings.api_host != settings.api_host
+        || old_settings.api_port != settings.api_port;
+    let new_api_enabled = settings.api_enabled;
+    let new_api_host = settings.api_host.clone();
+    let new_api_port = settings.api_port;
+
     store.update_settings(settings)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    if api_changed {
+        let store_arc: Arc<DataStore> = (*store).clone();
+        let api_state_clone: ApiServerState = (*api_state).clone();
+        // 在后台执行避免阻塞设置保存返回
+        tokio::spawn(async move {
+            // 1. 停掉现有服务（如果有）
+            let mut guard = api_state_clone.lock().await;
+            if let Some(handle) = guard.take() {
+                println!("[Settings] 停止已有 API 服务（{}:{})", handle.host, handle.port);
+                handle.shutdown().await;
+            }
+            // 2. 如启用则启动新服务
+            if new_api_enabled {
+                match api::start_server(store_arc, new_api_host.clone(), new_api_port).await {
+                    Ok(handle) => *guard = Some(handle),
+                    Err(e) => eprintln!("[Settings] API 服务热重启失败：{}", e),
+                }
+            }
+        });
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
