@@ -21,12 +21,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+// 用 axum_extra::Query 而非 axum::Query：后者的 serde_urlencoded 不支持 Vec<T>，
+// 导致 ?plan_names[]=TRIAL / ?statuses[]=normal 这类数组参数被静默忽略。
+use axum_extra::extract::Query;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;

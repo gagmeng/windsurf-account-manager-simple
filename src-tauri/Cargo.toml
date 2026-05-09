@@ -49,6 +49,8 @@ regex = "1.10"
 zip = "0.6"
 # 外部 HTTP API（仅内部使用，监听地址/端口在 Settings 里配置）
 axum = "0.7"
+# axum-extra 的 Query 用 serde_html_form，原生支持 Vec<T> 和 ?key[]=v / ?key=v&key=v 两种数组写法
+axum-extra = { version = "0.9", features = ["query"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 

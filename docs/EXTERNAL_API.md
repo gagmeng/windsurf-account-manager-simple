@@ -124,8 +124,11 @@ GET http://127.0.0.1:46953/api/v1/health
 | `daily_quota_percent_min` / `daily_quota_percent_max` | int 0-100 | 日配额剩余百分比 |
 | `weekly_quota_percent_min` / `weekly_quota_percent_max` | int 0-100 | 周配额剩余百分比 |
 
-> **数组传参方式**：URL 里多次出现同名 key 即可，如 `?plan_names[]=TRIAL&plan_names[]=PRO`。
-> URL 编码下：`[]` → `%5B%5D`、空格 → `%20` 或 `+`。
+> **数组传参方式**（两种都支持，推荐第一种）：
+> - ⚡ **重复同名键**（推荐）：`?plan_names=TRIAL&plan_names=PRO`
+> - 传统 `[]` 语法：`?plan_names[]=TRIAL&plan_names[]=PRO`（`[]` 需要 URL 编码为 `%5B%5D`）
+>
+> URL 编码参考：`[]` → `%5B%5D`、空格 → `%20` 或 `+`。
 
 ##### 排序
 
@@ -152,16 +155,16 @@ GET http://127.0.0.1:46953/api/v1/health
 curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=10000"
 
 # 仅 TRIAL 套餐
-curl "http://127.0.0.1:46953/api/v1/accounts?plan_names%5B%5D=TRIAL"
+curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=10000&plan_names=TRIAL"
 
 # 多套餐 + 状态正常
-curl "http://127.0.0.1:46953/api/v1/accounts?plan_names%5B%5D=TRIAL&plan_names%5B%5D=PRO&statuses%5B%5D=normal"
+curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=10000&plan_names=TRIAL&plan_names=PRO&statuses=normal"
 
 # 即将过期的账号（剩余 1-7 天）
-curl "http://127.0.0.1:46953/api/v1/accounts?expiry_days_min=1&expiry_days_max=7"
+curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=10000&expiry_days_min=1&expiry_days_max=7"
 
 # 按到期时间倒序
-curl "http://127.0.0.1:46953/api/v1/accounts?sort_field=subscription_expires_at&sort_direction=desc"
+curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=10000&sort_field=subscription_expires_at&sort_direction=desc"
 ```
 
 ---
@@ -389,19 +392,19 @@ console.log(`Ready: ${list.accounts.length}`);
 
 ```bash
 # 或服务端过滤（需先用 /stats 确认大小写）
-curl "http://127.0.0.1:46953/api/v1/accounts?plan_names%5B%5D=TRIAL&page_size=10000"
+curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=10000&plan_names=TRIAL"
 ```
 
 ### 场景 3：找快过期的账号（7 天内）
 
 ```bash
-curl "http://127.0.0.1:46953/api/v1/accounts?expiry_days_min=0&expiry_days_max=7&page_size=10000"
+curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=10000&expiry_days_min=0&expiry_days_max=7"
 ```
 
 ### 场景 4：找配额还充足的账号（按周配额排序，剩余 > 50%）
 
 ```bash
-curl "http://127.0.0.1:46953/api/v1/accounts?weekly_quota_percent_min=50&sort_field=weekly_quota_remaining_percent&sort_direction=desc&page_size=100"
+curl "http://127.0.0.1:46953/api/v1/accounts?page=1&page_size=100&weekly_quota_percent_min=50&sort_field=weekly_quota_remaining_percent&sort_direction=desc"
 ```
 
 ### 场景 5：定时巡检 + 邮件告警
@@ -412,7 +415,7 @@ import requests, smtplib
 BASE = "http://127.0.0.1:46953/api/v1"
 # 找出失效账号
 bad = requests.get(f"{BASE}/accounts", params={
-    "statuses[]": ["error", "disabled", "offline"],
+    "statuses": ["error", "disabled", "offline"],   # requests 会自动展开为 ?statuses=error&statuses=disabled&statuses=offline
     "page_size": 10000,
 }).json()
 
@@ -433,16 +436,16 @@ if bad["total"] > 0:
    - 名称：`列出 TRIAL 账号`
    - Method：`GET`
    - URL：`{{base_url}}/accounts`
-   - **Params**：
+   - **Params**（重复同名 key 即可，不需 `[]`）：
      ```
      page          1
      page_size     10000
-     plan_names[]  TRIAL
-     plan_names[]  Devin Trial   (再加一行同名 key)
-     statuses[]    normal
+     plan_names    TRIAL
+     plan_names    Devin Trial   (再加一行同名 key)
+     statuses      normal
      ```
    - Postman 会自动拼成：
-     `?page=1&page_size=10000&plan_names[]=TRIAL&plan_names[]=Devin+Trial&statuses[]=normal`
+     `?page=1&page_size=10000&plan_names=TRIAL&plan_names=Devin+Trial&statuses=normal`
 
 ---
 
