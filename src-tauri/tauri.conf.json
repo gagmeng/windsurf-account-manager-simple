@@ -24,7 +24,9 @@
   },
   "plugins": {
     "updater": {
-      "active": false
+      "active": false,
+      "endpoints": [],
+      "pubkey": ""
     }
   },
   "bundle": {
