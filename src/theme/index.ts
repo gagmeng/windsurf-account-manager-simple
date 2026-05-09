@@ -1,4 +1,4 @@
-export const DEFAULT_THEME_ID = 'aurora';
+export const DEFAULT_THEME_ID = 'original-light';
 
 export const THEMES = [
   { id: 'original-light', name: '原始浅色', accent: '#409eff', isDark: false },

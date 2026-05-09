@@ -372,18 +372,21 @@
 
   <!-- 积分记录对话框 -->
   <CreditHistoryDialog
+    v-if="showCreditHistoryDialog"
     v-model="showCreditHistoryDialog"
     :account-id="account.id"
   />
 
   <!-- 座位更新结果对话框 -->
   <UpdateSeatsResultDialog
+    v-if="showSeatsResultDialog"
     v-model="showSeatsResultDialog"
     :result-data="seatsResultData"
   />
 
   <!-- 使用分析对话框 -->
   <AnalyticsDialog
+    v-if="showAnalyticsDialog"
     v-model="showAnalyticsDialog"
     :account-id="account.id"
     :account-email="account.email"
@@ -391,24 +394,28 @@
 
   <!-- 团队设置对话框 -->
   <TeamSettingsDialog
+    v-if="showTeamSettingsDialog"
     v-model="showTeamSettingsDialog"
     :account-id="account.id"
   />
 
   <!-- 团队管理对话框 -->
   <TeamManagementDialog
+    v-if="showTeamManagementDialog"
     v-model="showTeamManagementDialog"
     :account-id="account.id"
   />
 
   <!-- 自动充值设置对话框 -->
   <AutoRefillDialog
+    v-if="showAutoRefillDialog"
     v-model="showAutoRefillDialog"
     :account-id="account.id"
   />
 
   <!-- 更换订阅对话框 -->
   <UpdatePlanDialog
+    v-if="showUpdatePlanDialog"
     v-model="showUpdatePlanDialog"
     :account-id="account.id"
     :account="account"
@@ -417,6 +424,7 @@
 
   <!-- Turnstile 验证对话框 -->
   <TurnstileDialog
+    v-if="showTurnstileDialog"
     :visible="showTurnstileDialog"
     @update:visible="showTurnstileDialog = $event"
     @success="handleTurnstileSuccess"
@@ -426,6 +434,7 @@
   <!-- 切号进度弹窗（独立居中 Dialog） -->
   <!-- 运行中禁止通过遮罩 / Esc 关闭，强制用户看到全流程；成功/失败时允许关闭 -->
   <el-dialog
+    v-if="switchProgress.visible"
     v-model="switchProgress.visible"
     :title="`切换到 ${switchProgress.accountName}`"
     width="460px"
@@ -2071,6 +2080,7 @@ async function handleSwitchAccount() {
   position: relative;
   cursor: pointer;
   user-select: none;
+  container-type: inline-size;
 }
 
 .account-card::before {
@@ -2829,33 +2839,46 @@ async function handleSwitchAccount() {
 }
 
 .card-actions {
-  padding: 5px 8px;
+  --action-button-count: 9;
+  --action-button-gap: clamp(2px, 0.5vw, 8px);
+  --action-button-size: clamp(24px, 2.2vw, 38px);
+  padding: 5px 4px;
   border-top: 1px solid #ebeef5;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
+  container-type: inline-size;
+}
+
+@supports (width: 1cqw) {
+  .card-actions {
+    --action-button-gap: clamp(2px, 1.1cqw, 8px);
+    --action-button-size: clamp(24px, calc((100cqw - (var(--action-button-gap) * (var(--action-button-count) - 1))) / var(--action-button-count)), 38px);
+    padding: 5px clamp(2px, 1cqw, 8px);
+    gap: clamp(4px, 1.2cqw, 8px);
+  }
 }
 
 .action-buttons {
-  display: flex;
-  gap: 4px;
-  justify-content: space-evenly;
-  flex-wrap: nowrap;
+  display: grid;
+  grid-template-columns: repeat(var(--action-button-count), minmax(0, 1fr));
+  column-gap: var(--action-button-gap);
+  justify-items: center;
   align-items: center;
-  padding: 2px;
-  height: 28px;
+  padding: 0;
+  min-height: var(--action-button-size);
+  width: 100%;
 }
 
 .action-buttons .el-button {
-  flex: 0 0 auto;
   margin: 0;
 }
 
 .action-buttons .el-button.el-button--small.is-circle {
-  width: 26px;
-  height: 26px;
+  width: var(--action-button-size);
+  height: var(--action-button-size);
   padding: 0;
-  min-width: 26px;
+  min-width: var(--action-button-size);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2863,7 +2886,7 @@ async function handleSwitchAccount() {
 
 /* 调整图标大小 */
 .action-buttons .el-button .el-icon {
-  font-size: 13px;
+  font-size: clamp(12px, calc(var(--action-button-size) * 0.46), 17px);
   line-height: 1;
   display: flex;
   align-items: center;

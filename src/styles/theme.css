@@ -164,6 +164,12 @@ html[data-theme] .header {
   background: var(--theme-panel-gradient) !important;
 }
 
+html[data-theme] .sidebar {
+  box-shadow: 8px 0 22px rgba(15, 23, 42, 0.06) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 html[data-theme] .main-content {
   background: transparent !important;
 }
@@ -197,6 +203,7 @@ html[data-theme] .sidebar-footer {
   background: transparent !important;
   border-color: var(--theme-border) !important;
   color: var(--theme-text) !important;
+  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease !important;
 }
 
 html[data-theme] .el-menu-item:hover,
@@ -393,7 +400,8 @@ html[data-theme] .el-message-box {
 
 html[data-theme] .sidebar {
   border-right: 1px solid var(--theme-border) !important;
-  box-shadow: 14px 0 38px rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 8px 0 22px rgba(15, 23, 42, 0.06) !important;
+  contain: layout paint style !important;
 }
 
 html[data-theme] .app-title {
@@ -425,6 +433,8 @@ html[data-theme] .sidebar-menu .el-menu-item.is-active {
 
 html[data-theme] .header {
   min-height: 72px !important;
+  height: 72px !important;
+  flex-wrap: nowrap !important;
   padding: 12px 18px !important;
   border-bottom: 1px solid var(--theme-border) !important;
   box-shadow: 0 18px 44px rgba(15, 23, 42, 0.08) !important;
@@ -432,7 +442,90 @@ html[data-theme] .header {
 
 html[data-theme] .header-left,
 html[data-theme] .header-right {
-  gap: 8px !important;
+  gap: 6px !important;
+}
+
+html[data-theme] .header-right {
+  flex-wrap: nowrap !important;
+  justify-content: flex-end !important;
+  min-width: 0 !important;
+}
+
+html[data-theme] .header.has-selected-actions {
+  gap: 4px !important;
+  padding: 12px 10px !important;
+}
+
+html[data-theme] .header.has-selected-actions .header-left,
+html[data-theme] .header.has-selected-actions .header-right {
+  gap: clamp(6px, 0.8vw, 12px) !important;
+}
+
+html[data-theme] .header.has-selected-actions .search-input {
+  width: 160px !important;
+}
+
+html[data-theme] .header.has-selected-actions .sort-select {
+  width: 86px !important;
+}
+
+html[data-theme] .header.has-selected-actions .header-right .el-button.is-circle,
+html[data-theme] .header.has-selected-actions .header-right .theme-trigger {
+  width: 34px !important;
+  height: 34px !important;
+  min-width: 34px !important;
+}
+
+@media (max-width: 1024px) {
+  html[data-theme] .header.has-selected-actions {
+    gap: 4px !important;
+    padding: 12px 8px !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .search-input {
+    width: 140px !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .sort-select {
+    width: 82px !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .header-right {
+    gap: clamp(3px, 0.5vw, 6px) !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .header-right .el-button.is-circle,
+  html[data-theme] .header.has-selected-actions .header-right .theme-trigger {
+    width: 30px !important;
+    height: 30px !important;
+    min-width: 30px !important;
+  }
+}
+
+@media (max-width: 768px) {
+  html[data-theme] .header.has-selected-actions {
+    gap: 3px !important;
+    padding: 12px 6px !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .search-input {
+    width: 120px !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .sort-select {
+    width: 74px !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .header-right {
+    gap: 2px !important;
+  }
+
+  html[data-theme] .header.has-selected-actions .header-right .el-button.is-circle,
+  html[data-theme] .header.has-selected-actions .header-right .theme-trigger {
+    width: 28px !important;
+    height: 28px !important;
+    min-width: 28px !important;
+  }
 }
 
 html[data-theme] .search-input .el-input__wrapper,
@@ -464,8 +557,6 @@ html[data-theme] .el-dropdown-menu__item {
 }
 
 html[data-theme] .header .el-button.is-circle,
-html[data-theme] .card-actions .el-button.is-circle,
-html[data-theme] .action-buttons .el-button.is-circle,
 html[data-theme] .sidebar-footer .el-button.is-circle,
 html[data-theme] .filter-toggle-btn,
 html[data-theme] .theme-trigger {
@@ -479,8 +570,6 @@ html[data-theme] .theme-trigger {
 }
 
 html[data-theme] .header .el-button.is-circle:hover,
-html[data-theme] .card-actions .el-button.is-circle:hover,
-html[data-theme] .action-buttons .el-button.is-circle:hover,
 html[data-theme] .sidebar-footer .el-button.is-circle:hover,
 html[data-theme] .filter-toggle-btn:hover,
 html[data-theme] .theme-trigger:hover {
@@ -662,13 +751,14 @@ html[data-theme] .card-actions {
 }
 
 html[data-theme] .action-buttons {
-  min-height: 32px !important;
-  gap: 6px !important;
+  min-height: var(--action-button-size) !important;
+  column-gap: var(--action-button-gap) !important;
 }
 
 html[data-theme] .action-buttons .el-button.el-button--small.is-circle {
-  width: 28px !important;
-  height: 28px !important;
+  width: var(--action-button-size) !important;
+  height: var(--action-button-size) !important;
+  min-width: var(--action-button-size) !important;
 }
 
 html[data-theme] .el-checkbox__inner {
@@ -2117,11 +2207,15 @@ html[data-theme] .mode-card.is-disabled {
   filter: saturate(0.72);
 }
 
-html[data-theme] .sidebar .app-title,
+html[data-theme] .sidebar.is-collapsed .app-title,
 html[data-theme] .sidebar .sidebar-footer {
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
+}
+
+html[data-theme] .sidebar:not(.is-collapsed) .app-title {
+  justify-content: flex-start !important;
 }
 
 html[data-theme] .sidebar .el-menu--collapse,
@@ -2245,7 +2339,7 @@ html[data-theme] .pagination-container .el-pagination {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58), 0 18px 44px rgba(31, 64, 128, 0.22) !important;
 }
 
-html[data-theme] .sidebar:not([style*='64px']) ~ .el-container .pagination-container {
+html[data-theme] .sidebar:not(.is-collapsed) ~ .el-container .pagination-container {
   left: 248px !important;
   max-width: calc(100vw - 266px) !important;
 }
@@ -3308,8 +3402,6 @@ html[data-theme='original-dark'] .el-form-item__label {
 }
 
 html[data-theme='original-light'] .header .el-button.is-circle,
-html[data-theme='original-light'] .card-actions .el-button.is-circle,
-html[data-theme='original-light'] .action-buttons .el-button.is-circle,
 html[data-theme='original-light'] .sidebar-footer .el-button.is-circle,
 html[data-theme='original-light'] .filter-toggle-btn,
 html[data-theme='original-light'] .theme-trigger,
@@ -3322,8 +3414,6 @@ html[data-theme='original-light'] .el-button.is-circle {
 }
 
 html[data-theme='original-dark'] .header .el-button.is-circle,
-html[data-theme='original-dark'] .card-actions .el-button.is-circle,
-html[data-theme='original-dark'] .action-buttons .el-button.is-circle,
 html[data-theme='original-dark'] .sidebar-footer .el-button.is-circle,
 html[data-theme='original-dark'] .filter-toggle-btn,
 html[data-theme='original-dark'] .theme-trigger,
@@ -3414,4 +3504,196 @@ html[data-theme] .account-card .status-subscription-inactive.status-indicator {
 html[data-theme] .account-card .status-inactive .status-text,
 html[data-theme] .account-card .status-subscription-inactive .status-text {
   color: #475569 !important;
+}
+
+html[data-theme] .accounts-grid {
+  contain: layout paint;
+}
+
+html[data-theme] .accounts-grid .account-card {
+  contain: layout paint;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08) !important;
+  transition: border-color 0.16s ease, background-color 0.16s ease !important;
+}
+
+html[data-theme] .accounts-grid .account-card::before {
+  display: none !important;
+  content: none !important;
+}
+
+html[data-theme] .accounts-grid .account-card:hover {
+  transform: none !important;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.1) !important;
+}
+
+html[data-theme] .accounts-grid .account-card .quota-section,
+html[data-theme] .accounts-grid .account-card .card-actions,
+html[data-theme] .accounts-grid .account-card .status-indicator,
+html[data-theme] .accounts-grid .account-card .el-tag,
+html[data-theme] .accounts-grid .account-card .custom-tag,
+html[data-theme] .accounts-grid .account-card .info-tag,
+html[data-theme] .accounts-grid .account-card .nickname-tag,
+html[data-theme] .accounts-grid .account-card .expiry-badge {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+html[data-theme] .accounts-grid .account-card .el-button.is-circle {
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease !important;
+}
+
+html[data-theme] .accounts-grid .account-card .el-button.is-circle:hover {
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+html[data-theme] .accounts-grid .account-card .status-dot,
+html[data-theme] .accounts-grid .account-card .status-dot::after,
+html[data-theme] .accounts-grid .account-card .expiry-badge.expiring-soon {
+  animation: none !important;
+}
+
+html[data-theme] .pagination-container .el-pagination {
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--theme-primary) 7%, rgba(15, 23, 42, 0.12)) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-theme] .pagination-container .el-pagination button,
+html[data-theme] .pagination-container .el-pager li,
+html[data-theme] .pagination-container .el-select__wrapper,
+html[data-theme] .pagination-container .el-input__wrapper {
+  box-shadow: none !important;
+}
+
+html[data-theme] .main-container::before {
+  display: none !important;
+  content: none !important;
+}
+
+html[data-theme] .sidebar,
+html[data-theme] .header,
+html[data-theme] .filter-panel,
+html[data-theme] .pagination-container,
+html[data-theme] .el-dialog,
+html[data-theme] .el-card,
+html[data-theme] .el-drawer,
+html[data-theme] .el-message-box,
+html[data-theme] .el-popper,
+html[data-theme] .el-select-dropdown,
+html[data-theme] .el-dropdown-menu,
+html[data-theme] .el-picker-panel,
+html[data-theme] .el-date-picker,
+html[data-theme] .el-popover.el-popper,
+html[data-theme] .el-alert,
+html[data-theme] .el-notification,
+html[data-theme] .el-message {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-theme] .sidebar,
+html[data-theme] .header,
+html[data-theme] .filter-panel,
+html[data-theme] .el-dialog,
+html[data-theme] .el-card,
+html[data-theme] .el-drawer,
+html[data-theme] .el-message-box {
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08) !important;
+}
+
+html[data-theme] .el-overlay,
+html[data-theme] .el-input__wrapper,
+html[data-theme] .el-select__wrapper,
+html[data-theme] .el-textarea__inner,
+html[data-theme] .el-input-number .el-input__wrapper {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-theme] .app-title .el-icon,
+html[data-theme] .sidebar-menu .el-icon,
+html[data-theme] .sidebar-footer .el-icon,
+html[data-theme] .account-card .plan-tag .el-icon,
+html[data-theme] .profile-plan-badge .el-icon {
+  filter: none !important;
+}
+
+html[data-theme] .sidebar-menu .el-menu-item,
+html[data-theme] .sidebar-menu .el-sub-menu__title,
+html[data-theme] .header .el-button.is-circle,
+html[data-theme] .sidebar-footer .el-button.is-circle,
+html[data-theme] .filter-toggle-btn,
+html[data-theme] .theme-trigger {
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease !important;
+}
+
+html[data-theme] .sidebar-menu .el-menu-item:hover,
+html[data-theme] .sidebar-menu .el-sub-menu__title:hover,
+html[data-theme] .sidebar-menu .el-menu-item.is-active,
+html[data-theme] .header .el-button.is-circle:hover,
+html[data-theme] .sidebar-footer .el-button.is-circle:hover,
+html[data-theme] .filter-toggle-btn:hover,
+html[data-theme] .theme-trigger:hover,
+html[data-theme] .theme-option:hover,
+html[data-theme] .theme-option.is-active {
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+html[data-theme] .info-card,
+html[data-theme] .stat-card,
+html[data-theme] .mini-stat-card,
+html[data-theme] .plan-card,
+html[data-theme] .current-plan-info,
+html[data-theme] .usage-section,
+html[data-theme] .cache-info,
+html[data-theme] .empty-state,
+html[data-theme] .raw-data,
+html[data-theme] .raw-response,
+html[data-theme] .billing-period,
+html[data-theme] .limit-item,
+html[data-theme] .detail-value,
+html[data-theme] .domain-list-card,
+html[data-theme] .referral-form-card,
+html[data-theme] .referral-results-card,
+html[data-theme] .member-card,
+html[data-theme] .team-card,
+html[data-theme] .section-card,
+html[data-theme] .form-card,
+html[data-theme] .data-card,
+html[data-theme] .list-card,
+html[data-theme] .panel-card,
+html[data-theme] .content-card,
+html[data-theme] .account-detail-card,
+html[data-theme] .analytics-card,
+html[data-theme] .chart-card,
+html[data-theme] .quota-card,
+html[data-theme] .payment-card,
+html[data-theme] .subscription-card,
+html[data-theme] .operation-card,
+html[data-theme] .log-card,
+html[data-theme] .history-card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08) !important;
+}
+
+html[data-theme] .info-card:hover,
+html[data-theme] .stat-card:hover,
+html[data-theme] .mini-stat-card:hover,
+html[data-theme] .plan-card:hover,
+html[data-theme] .bin-list-item:hover,
+html[data-theme] .generated-card-item:hover,
+html[data-theme] .member-card:hover,
+html[data-theme] .team-card:hover,
+html[data-theme] .domain-list-card:hover,
+html[data-theme] .referral-form-card:hover,
+html[data-theme] .referral-results-card:hover {
+  transform: none !important;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.1) !important;
 }

@@ -255,7 +255,7 @@ watch(() => props.modelValue, (val) => {
   if (val && props.accountId) {
     loadCreditEntries();
   }
-});
+}, { immediate: true });
 
 watch(visible, (val) => {
   emit('update:modelValue', val);

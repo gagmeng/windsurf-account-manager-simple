@@ -78,7 +78,7 @@ watch(() => props.visible, (val) => {
       loadTurnstile();
     });
   }
-});
+}, { immediate: true });
 
 watch(dialogVisible, (val) => {
   emit('update:visible', val);

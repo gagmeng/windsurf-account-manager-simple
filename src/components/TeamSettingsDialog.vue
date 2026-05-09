@@ -196,6 +196,7 @@
     
     <!-- Models Configuration Dialog -->
     <el-dialog
+      v-if="modelsDialogVisible"
       v-model="modelsDialogVisible"
       title="模型配置 (Models)"
       width="700px"
@@ -303,6 +304,7 @@
     
     <!-- MCP Whitelist Dialog -->
     <el-dialog
+      v-if="mcpDialogVisible"
       v-model="mcpDialogVisible"
       title="添加 MCP 服务器"
       width="500px"
@@ -385,6 +387,7 @@
     
     <!-- Codemaps Configuration Dialog -->
     <el-dialog
+      v-if="codemapsDialogVisible"
       v-model="codemapsDialogVisible"
       title="代码地图 (Codemaps)"
       width="500px"
@@ -523,7 +526,7 @@ watch(() => props.modelValue, (val) => {
   if (val) {
     loadSettings();
   }
-});
+}, { immediate: true });
 
 watch(dialogVisible, (val) => {
   emit('update:modelValue', val);

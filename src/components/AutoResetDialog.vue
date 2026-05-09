@@ -22,7 +22,7 @@
     
     <el-tabs v-model="activeTab" @tab-change="handleTabChange" class="custom-tabs">
       <!-- Tab 1: 规则配置 -->
-      <el-tab-pane label="规则配置" name="rules">
+      <el-tab-pane label="规则配置" name="rules" lazy>
         <div class="tab-content">
           <!-- 添加配置区域 -->
           <el-card class="add-config-card" shadow="never">
@@ -261,7 +261,7 @@
       </el-tab-pane>
       
       <!-- Tab 2: 重置记录 -->
-      <el-tab-pane label="重置记录" name="records">
+      <el-tab-pane label="重置记录" name="records" lazy>
         <div class="tab-content">
           <el-card shadow="never">
             <template #header>
@@ -336,7 +336,7 @@
       </el-tab-pane>
       
       <!-- Tab 3: 统计概览 -->
-      <el-tab-pane label="统计概览" name="stats">
+      <el-tab-pane label="统计概览" name="stats" lazy>
         <div class="tab-content">
           <el-card shadow="never">
             <template #header>
@@ -401,6 +401,7 @@
     
     <!-- 编辑对话框 -->
     <el-dialog
+      v-if="showEditDialog"
       v-model="showEditDialog"
       title="编辑自动重置规则"
       width="450px"
@@ -986,7 +987,7 @@ watch(visible, (val) => {
     loadConfigs();
     activeTab.value = 'rules';
   }
-});
+}, { immediate: true });
 
 // 组件卸载时清除定时器
 onUnmounted(() => {

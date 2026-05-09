@@ -304,7 +304,6 @@ import {
   Refresh,
   Finished
 } from '@element-plus/icons-vue';
-import * as echarts from 'echarts';
 import type { ECharts } from 'echarts';
 import { analyticsApi } from '@/api';
 import type { AnalyticsData } from '@/types/analytics';
@@ -388,6 +387,8 @@ const chatModelChartRef = ref<HTMLElement>();
 const completionsByDayChartRef = ref<HTMLElement>();
 const chatsByDayChartRef = ref<HTMLElement>();
 
+let echarts: typeof import('echarts');
+
 // 图表实例
 let dailyChart: ECharts | null = null;
 let toolChart: ECharts | null = null;
@@ -404,7 +405,7 @@ watch(() => props.modelValue, (val) => {
   if (val) {
     loadAnalytics();
   }
-});
+}, { immediate: true });
 
 // 监听 visible 变化
 watch(visible, (val) => {
@@ -426,7 +427,7 @@ const loadAnalytics = async () => {
     console.log('[AnalyticsDialog] Model usage details:', analyticsData.value?.model_usage_details);
     console.log('[AnalyticsDialog] Summary:', analyticsData.value?.summary);
     await nextTick();
-    initCharts();
+    await initCharts();
   } catch (error: any) {
     console.error('[AnalyticsDialog] Error loading analytics:', error);
     ElMessage.error(error || '加载分析数据失败');
@@ -436,11 +437,13 @@ const loadAnalytics = async () => {
 };
 
 // 初始化所有图表
-const initCharts = () => {
+const initCharts = async () => {
   if (!analyticsData.value) {
     console.error('[initCharts] No analytics data available');
     return;
   }
+
+  echarts = await import('echarts');
 
   console.log('[initCharts] Starting chart initialization');
   console.log('[initCharts] Data arrays lengths:', {

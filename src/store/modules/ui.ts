@@ -1,10 +1,26 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import { applyTheme, normalizeThemeId, type ThemeId } from '@/theme';
+import { applyTheme, DEFAULT_THEME_ID, normalizeThemeId, type ThemeId } from '@/theme';
+
+const LEGACY_DEFAULT_THEME_ID = 'aurora';
+const THEME_DEFAULT_MIGRATION_KEY = 'theme-default-migrated-to-original-light';
+
+function getInitialTheme(): ThemeId {
+  const storedTheme = localStorage.getItem('theme');
+  const migrationCompleted = localStorage.getItem(THEME_DEFAULT_MIGRATION_KEY) === 'true';
+
+  localStorage.setItem(THEME_DEFAULT_MIGRATION_KEY, 'true');
+
+  if (storedTheme === LEGACY_DEFAULT_THEME_ID && !migrationCompleted) {
+    return DEFAULT_THEME_ID;
+  }
+
+  return normalizeThemeId(storedTheme);
+}
 
 export const useUIStore = defineStore('ui', () => {
   const sidebarCollapsed = ref(true);  // 默认收缩
-  const savedTheme = normalizeThemeId(localStorage.getItem('theme'));
+  const savedTheme = getInitialTheme();
   const theme = ref<ThemeId>(savedTheme);
   
   applyTheme(savedTheme);

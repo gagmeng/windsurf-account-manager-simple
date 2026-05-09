@@ -377,7 +377,7 @@ watch(() => props.modelValue, (val) => {
     billingPreview.value = null;
     resetLoopStats();
   }
-});
+}, { immediate: true });
 
 watch(visible, (val) => {
   emit('update:modelValue', val);

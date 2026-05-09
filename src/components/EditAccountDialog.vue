@@ -150,7 +150,7 @@ watch(currentAccount, (account) => {
     formData.tags = [...account.tags];
     formData.tagColors = account.tagColors ? [...account.tagColors] : [];
   }
-});
+}, { immediate: true });
 
 const validatePassword = (_rule: any, value: any, callback: any) => {
   if (value && formData.newPassword && value !== formData.newPassword) {

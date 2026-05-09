@@ -18,6 +18,7 @@ export const useAccountsStore = defineStore('accounts', () => {
   // 批量更新队列（用于优化大量账号更新时的性能）
   const pendingUpdates = ref<Map<string, Account>>(new Map());
   let batchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  let pageFetchRequestId = 0;
 
   // 分页状态
   const pagination = ref<PaginationConfig>({
@@ -125,6 +126,7 @@ export const useAccountsStore = defineStore('accounts', () => {
    * 调用后端 `get_accounts_page`，仅拉取 20-100 条。IPC 传输从 300MB 降到 <100KB。
    */
   async function fetchPage() {
+    const requestId = ++pageFetchRequestId;
     loading.value = true;
     error.value = null;
     try {
@@ -153,13 +155,19 @@ export const useAccountsStore = defineStore('accounts', () => {
       };
 
       const response = await accountApi.getAccountsPage(request);
+      if (requestId !== pageFetchRequestId) return;
+
       accounts.value = response.accounts;
       serverTotal.value = response.total;
     } catch (e) {
-      error.value = (e as Error).message;
+      if (requestId === pageFetchRequestId) {
+        error.value = (e as Error).message;
+      }
       throw e;
     } finally {
-      loading.value = false;
+      if (requestId === pageFetchRequestId) {
+        loading.value = false;
+      }
     }
   }
 
@@ -448,12 +456,16 @@ export const useAccountsStore = defineStore('accounts', () => {
 
   // 分页操作
   function setCurrentPage(page: number) {
+    if (pagination.value.currentPage === page) return;
+
     pagination.value.currentPage = page;
     // v1.7.8 方案 B：翻页触发后端查询
     fetchPage().catch(() => {});
   }
 
   function setPageSize(size: number) {
+    if (pagination.value.pageSize === size && pagination.value.currentPage === 1) return;
+
     pagination.value.pageSize = size;
     pagination.value.currentPage = 1;
     // v1.7.8 方案 B：页大小变化触发后端查询

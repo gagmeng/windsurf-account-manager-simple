@@ -6,7 +6,7 @@ A Windsurf multi-account management desktop application built with Tauri + Vue 3
 
 ## 📦 Project Information
 
-- **Current Version**: 1.7.7
+- **Current Version**: 1.7.9
 - **License**: AGPL-3.0
 - **Development Language**: Rust + TypeScript
 - **Supported Platforms**: Windows 10/11
@@ -124,6 +124,21 @@ A Windsurf multi-account management desktop application built with Tauri + Vue 3
 ---
 
 ## 📜 Version History
+
+### v1.7.10 (2026-05-08)
+- **Initial UI load performance optimization**: Added lazy rendering to heavy `el-tab-pane` sections in Settings, Team Management, Auto Reset, Account Info, and related dialogs, preventing all tables, forms, and information panels from mounting when the parent dialog first opens
+- **On-demand mounting for nested dialogs**: Hidden child dialogs in Team Management, Team Settings, Account Info, Settings backups, Auto Reset editing, and related flows now use `v-if` on-demand mounting to reduce initial DOM size and hidden form initialization cost
+- **Deferred chart library loading**: ECharts in `AnalyticsDialog` is now dynamically imported only when the analytics dialog initializes charts, keeping the charting library out of the account page initial loading path
+- **Responsive account panel layout optimization**: Account card grids now adjust column count and minimum card width based on available space; card footer action buttons now fluidly scale button size, icon size, and gaps based on card width, while the top selected-account batch toolbar stays on a single row and fluidly expands or tightens button size, icon size, search/sort widths, and button gaps based on available space. This fixes right-side button clipping and uneven toolbar spacing in narrow-screen, high-column, or multi-selection layouts
+- **Account card max-width fix**: Account grid columns now use fixed maximum widths with left alignment, fixing the issue where the only card on the last page or in filtered results could be stretched across the full row by `auto-fit + 1fr`
+- **Default window width optimization**: Adjusted the default window width to fit three account-card columns with the sidebar collapsed, reducing the horizontal empty space caused by only showing two columns on first launch
+- **Pagination switching performance optimization**: Switching to 50/100 items per page or changing pages now renders the first 20 account cards immediately and fills the rest in animation-frame batches, while paginated requests ignore stale responses and skip duplicate requests to reduce long stalls from mounting many complex cards at once
+- **Themed blank-card fix**: Removed CSS `content-visibility` lazy-paint placeholders from themed account cards, fixing the issue where lower cards on 100-items-per-page views could show blank shells without their contents being painted promptly
+- **Sidebar expansion performance optimization**: Sidebar expand/collapse now staggers the container width animation and Element Plus menu collapse state updates, keeps the title text mounted and switches it with opacity/translate transitions, and reduces themed sidebar backdrop blur and large-shadow repaint cost to minimize click-to-expand stutter
+- **Default theme adjustment**: Fresh installs and missing-theme configurations now default to the native light theme `original-light`, and the legacy default `aurora` is migrated to `original-light` once; frontend theme defaults, settings defaults, and backend configuration defaults stay aligned
+- **On-demand Team Management data loading**: Team Management now loads only the default members tab on open; invitations, my invitation, pending requests, and other tab data are requested only when their tabs become active, while avoiding duplicate member loading when reopening from a non-default tab
+- **Account Info rendering optimization**: User details, Firebase, API Keys, Provider Key, and other information tabs now render lazily while preserving the existing logic that loads API Key / Provider Key data only when those tabs are selected
+- **Build error fix**: Removed an invalid leftover `clientDisplayName` assignment from `SettingsDialog.vue`, fixing `vue-tsc` TS2304 / TS2339 build errors
 
 ### v1.7.8 (2026-05-04)
 - **Windsurf new login protocol adaptation**: Windsurf backend updated `WindsurfPostAuth` endpoint to require `X-Devin-Auth1-Token` HTTP header. Added the header in `devin_auth_service.rs::windsurf_post_auth`; all Devin login/registration/multi-org selection flows automatically benefit

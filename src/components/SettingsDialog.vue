@@ -6,7 +6,7 @@
   >
     <el-tabs v-model="activeTab" type="border-card">
       <!-- 基础设置标签页 -->
-      <el-tab-pane label="基础设置" name="basic">
+      <el-tab-pane label="基础设置" name="basic" lazy>
         <el-form :model="settings" label-width="140px">
           <el-form-item label="自动刷新Token">
             <el-switch v-model="settings.auto_refresh_token" />
@@ -143,7 +143,7 @@
       </el-tab-pane>
       
       <!-- 支付设置标签页 -->
-      <el-tab-pane label="支付设置" name="payment">
+      <el-tab-pane label="支付设置" name="payment" lazy>
         <el-form :model="settings" label-width="140px">
           <el-divider content-position="left">订阅计划设置</el-divider>
           
@@ -417,7 +417,7 @@
       </el-tab-pane>
       
       <!-- 无感换号标签页 -->
-      <el-tab-pane label="无感换号" name="seamless">
+      <el-tab-pane label="无感换号" name="seamless" lazy>
         <el-form :model="settings" label-width="140px">
           <el-form-item label="客户端类型">
             <el-select
@@ -567,7 +567,7 @@
       </el-tab-pane>
       
       <!-- 备份设置标签页 -->
-      <el-tab-pane label="备份设置" name="backup">
+      <el-tab-pane label="备份设置" name="backup" lazy>
         <el-form :model="settings" label-width="140px">
           <el-form-item label="自动备份">
             <el-switch v-model="settings.autoBackupEnabled" />
@@ -625,6 +625,7 @@
         
         <!-- 备份列表对话框 -->
         <el-dialog
+          v-if="showBackupsDialog"
           v-model="showBackupsDialog"
           title="备份列表"
           width="600px"
@@ -747,7 +748,7 @@ const settings = reactive<{
   auto_refresh_token: true,
   seat_count_options: [18, 19, 20],
   retry_times: 2,
-  theme: 'aurora',
+  theme: 'original-light',
   concurrent_limit: 5,
   show_seats_result_dialog: false,  // 默认关闭
   autoOpenPaymentLinkInWebview: false,  // 默认关闭自动打开支付页面
@@ -1026,7 +1027,7 @@ watch(() => uiStore.showSettingsDialog, async (show) => {
     await loadSuccessBinCount();
     await loadTestModeProgress();
   }
-});
+}, { immediate: true });
 
 onMounted(async () => {
   // 如果已有路径，检查状态

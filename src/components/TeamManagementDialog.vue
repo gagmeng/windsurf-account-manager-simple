@@ -11,7 +11,7 @@
       <!-- 标签页 -->
       <el-tabs v-model="activeTab" type="border-card">
         <!-- 团队成员列表 -->
-        <el-tab-pane label="团队成员" name="members">
+        <el-tab-pane label="团队成员" name="members" lazy>
           <!-- 邀请链接区域 -->
           <div v-if="teamInviteId" class="invite-link-section">
             <div class="invite-link-label">
@@ -122,7 +122,7 @@
         </el-tab-pane>
         
         <!-- 待处理邀请 -->
-        <el-tab-pane label="待处理邀请" name="invitations">
+        <el-tab-pane label="待处理邀请" name="invitations" lazy>
           <div class="tab-header">
             <el-button size="small" @click="loadPendingInvitations">
               <el-icon><Refresh /></el-icon>
@@ -162,7 +162,7 @@
         </el-tab-pane>
         
         <!-- 我的邀请（普通用户） -->
-        <el-tab-pane label="我的邀请" name="my-invitation">
+        <el-tab-pane label="我的邀请" name="my-invitation" lazy>
           <div class="my-invitation-section">
             <div v-if="myInvitation" class="invitation-card">
               <div class="invitation-info">
@@ -190,7 +190,7 @@
         </el-tab-pane>
 
         <!-- 申请加入团队 -->
-        <el-tab-pane label="申请加入" name="join-team">
+        <el-tab-pane label="申请加入" name="join-team" lazy>
           <div class="join-team-section">
             <el-alert
               title="通过邀请链接加入团队"
@@ -218,7 +218,7 @@
         </el-tab-pane>
 
         <!-- 待审批申请（管理员） -->
-        <el-tab-pane label="待审批" name="pending-requests">
+        <el-tab-pane label="待审批" name="pending-requests" lazy>
           <div class="tab-header">
             <el-button size="small" @click="loadTeamMembers">
               <el-icon><Refresh /></el-icon>
@@ -255,6 +255,7 @@
     
     <!-- 邀请成员对话框 -->
     <el-dialog
+      v-if="showInviteDialog"
       v-model="showInviteDialog"
       title="邀请成员"
       width="500px"
@@ -305,6 +306,7 @@
     
     <!-- 转让订阅对话框 -->
     <el-dialog
+      v-if="showTransferDialog"
       v-model="showTransferDialog"
       title="转让订阅"
       width="500px"
@@ -363,6 +365,7 @@
 
     <!-- 成员详情对话框 -->
     <el-dialog
+      v-if="showMemberDetail"
       v-model="showMemberDetail"
       :title="selectedMember?.name || '成员详情'"
       width="520px"
@@ -460,6 +463,18 @@ const dialogVisible = computed({
 
 const loading = ref(false)
 const activeTab = ref('members')
+
+watch(activeTab, (newTab) => {
+  if (!dialogVisible.value) return
+
+  if (newTab === 'invitations') {
+    loadPendingInvitations()
+  } else if (newTab === 'my-invitation') {
+    loadMyInvitation()
+  } else if (newTab === 'members' || newTab === 'pending-requests') {
+    loadTeamMembers()
+  }
+})
 
 // 团队邀请ID
 const teamInviteId = ref('')
@@ -1505,11 +1520,13 @@ async function copyInviteUrl() {
 watch(dialogVisible, (val) => {
   if (val) {
     loadTeamInfo()
-    loadTeamMembers()
-    loadPendingInvitations()
-    loadMyInvitation()
+    if (activeTab.value === 'members') {
+      loadTeamMembers()
+    } else {
+      activeTab.value = 'members'
+    }
   }
-})
+}, { immediate: true })
 </script>
 
 <style scoped>

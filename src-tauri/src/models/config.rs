@@ -190,7 +190,7 @@ impl Default for Settings {
             auto_refresh_token: true,
             seat_count_options: vec![18, 19, 20],
             retry_times: 2,
-            theme: "aurora".to_string(),
+            theme: "original-light".to_string(),
             concurrent_limit: 5,
             show_seats_result_dialog: false,  // 默认关闭
             sort_config: SortConfig::default(),  // 默认自定义排序

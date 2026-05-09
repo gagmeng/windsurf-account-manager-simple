@@ -15,7 +15,7 @@
     <div v-else-if="accountInfo" class="dialog-content">
       <el-tabs class="custom-tabs" v-model="activeInfoTab" @tab-change="onInfoTabChange">
         <!-- 用户详情页面 -->
-        <el-tab-pane label="用户详情" name="user-details">
+        <el-tab-pane label="用户详情" name="user-details" lazy>
           <template #label>
             <span class="tab-label"><el-icon><User /></el-icon> 用户详情</span>
           </template>
@@ -480,7 +480,7 @@
         </el-tab-pane>
         
         <!-- 本地信息 -->
-        <el-tab-pane label="本地信息" name="local-info">
+        <el-tab-pane label="本地信息" name="local-info" lazy>
           <template #label>
             <span class="tab-label"><el-icon><Monitor /></el-icon> 本地信息</span>
           </template>
@@ -545,7 +545,7 @@
         </el-tab-pane>
         
         <!-- Firebase信息 -->
-        <el-tab-pane label="Firebase" name="firebase" v-if="accountInfo.firebase_info">
+        <el-tab-pane label="Firebase" name="firebase" v-if="accountInfo.firebase_info" lazy>
           <template #label>
             <span class="tab-label"><el-icon><Key /></el-icon> Firebase信息</span>
           </template>
@@ -693,7 +693,7 @@
         </el-tab-pane>
 
         <!-- API密钥管理 -->
-        <el-tab-pane label="API密钥" name="api-keys">
+        <el-tab-pane label="API密钥" name="api-keys" lazy>
           <template #label>
             <span class="tab-label"><el-icon><Key /></el-icon> API密钥</span>
           </template>
@@ -857,7 +857,7 @@
         </el-tab-pane>
 
         <!-- 第三方API Provider Key管理 -->
-        <el-tab-pane label="Provider Key" name="provider-keys">
+        <el-tab-pane label="Provider Key" name="provider-keys" lazy>
           <template #label>
             <span class="tab-label"><el-icon><Connection /></el-icon> Provider Key</span>
           </template>
@@ -953,6 +953,7 @@
 
   <!-- 新生成的API密钥显示对话框 -->
   <el-dialog
+    v-if="showNewApiKeyDialog"
     v-model="showNewApiKeyDialog"
     title="新API密钥已生成"
     width="600px"
@@ -979,6 +980,7 @@
 
   <!-- 添加Provider Key对话框 -->
   <el-dialog
+    v-if="showAddProviderKeyDialog"
     v-model="showAddProviderKeyDialog"
     title="添加第三方 Provider Key"
     width="500px"
@@ -1128,7 +1130,7 @@ watch(() => uiStore.showAccountInfoDialog, (show) => {
       loadUserDetails();
     }, 500);
   }
-});
+}, { immediate: true });
 
 watch(visible, (val) => {
   if (!val) {

@@ -239,7 +239,7 @@ watch(() => props.modelValue, (val) => {
   if (val) {
     loadSettings()
   }
-})
+}, { immediate: true })
 </script>
 
 <style scoped>

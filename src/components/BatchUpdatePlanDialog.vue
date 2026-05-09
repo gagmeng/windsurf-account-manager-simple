@@ -293,7 +293,7 @@ watch(() => props.modelValue, (val) => {
   if (val) {
     resetState();
   }
-});
+}, { immediate: true });
 
 watch(visible, (val) => {
   emit('update:modelValue', val);

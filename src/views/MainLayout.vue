@@ -1,17 +1,17 @@
 <template>
   <el-container class="main-container">
     <!-- 侧边栏 -->
-    <el-aside :width="sidebarWidth" class="sidebar" :style="{ overflow: 'hidden' }">
+    <el-aside :width="sidebarWidth" class="sidebar" :class="{ 'is-collapsed': uiStore.sidebarCollapsed }" :style="{ overflow: 'hidden' }">
       <div class="app-title">
         <el-icon size="24"><Connection /></el-icon>
-        <div v-if="!uiStore.sidebarCollapsed" class="app-title-text">
+        <div class="app-title-text" :aria-hidden="uiStore.sidebarCollapsed">
           <span>Windsurf Manager</span>
           <span class="version-text">v{{ appVersion }}</span>
         </div>
       </div>
       
       <el-menu
-        :collapse="uiStore.sidebarCollapsed"
+        :collapse="menuCollapsed"
         :default-active="activeMenu"
         :default-openeds="[]"
         class="sidebar-menu"
@@ -90,7 +90,7 @@
         <el-button 
           :icon="uiStore.sidebarCollapsed ? ArrowRight : ArrowLeft"
           circle
-          @click="uiStore.toggleSidebar"
+          @click="toggleSidebar"
         />
       </div>
     </el-aside>
@@ -98,7 +98,7 @@
     <!-- 主内容区 -->
     <el-container>
       <!-- 顶部操作栏 -->
-      <el-header class="header">
+      <el-header class="header" :class="{ 'has-selected-actions': accountsStore.selectedAccounts.size > 0 }">
         <div class="header-left">
           <el-input
             v-model="searchQuery"
@@ -383,11 +383,11 @@
           </div>
         </transition>
 
-        <div v-if="accountsStore.loading" class="loading-container">
+        <div v-if="accountsStore.loading && accountsStore.paginatedAccounts.length === 0" class="loading-container">
           <el-icon class="is-loading" size="32"><Loading /></el-icon>
         </div>
         
-        <div v-else-if="accountsStore.filteredAccounts.length === 0" class="empty-container">
+        <div v-else-if="!accountsStore.loading && accountsStore.filteredAccounts.length === 0" class="empty-container">
           <el-empty description="暂无账号数据">
             <el-button type="primary" @click="uiStore.openAddAccountDialog">
               添加第一个账号
@@ -395,10 +395,15 @@
           </el-empty>
         </div>
         
-        <div v-else class="accounts-container">
+        <div v-else class="accounts-container" :class="{ 'is-refreshing': accountsStore.loading }">
+          <div v-if="accountsStore.loading" class="accounts-loading-overlay">
+            <el-icon class="is-loading" size="22"><Loading /></el-icon>
+            <span>正在刷新...</span>
+          </div>
+
           <div class="accounts-grid">
             <AccountCard
-              v-for="account in accountsStore.paginatedAccounts"
+              v-for="account in renderedAccounts"
               :key="account.id"
               :account="account"
               :is-selected="accountsStore.selectedAccounts.has(account.id)"
@@ -407,12 +412,16 @@
               @update="handleAccountUpdate"
             />
           </div>
+
+          <div v-if="isRenderingAccountBatch" class="account-rendering-hint">
+            正在渲染更多账号...
+          </div>
           
           <!-- 分页组件 -->
           <div class="pagination-container" v-if="accountsStore.totalCount > accountsStore.pagination.pageSize">
             <el-pagination
-              v-model:current-page="accountsStore.pagination.currentPage"
-              v-model:page-size="accountsStore.pagination.pageSize"
+              :current-page="accountsStore.pagination.currentPage"
+              :page-size="accountsStore.pagination.pageSize"
               :page-sizes="accountsStore.pagination.pageSizes"
               :total="accountsStore.totalCount"
               layout="total, sizes, prev, pager, next, jumper"
@@ -426,24 +435,27 @@
     </el-container>
 
     <!-- 对话框组件 -->
-    <AddAccountDialog />
-    <EditAccountDialog />
-    <SettingsDialog />
+    <AddAccountDialog v-if="uiStore.showAddAccountDialog" />
+    <EditAccountDialog v-if="uiStore.showEditAccountDialog" />
+    <SettingsDialog v-if="uiStore.showSettingsDialog" />
     <BatchImportDialog 
+      v-if="showBatchImportDialog"
       v-model="showBatchImportDialog" 
       @import="handleBatchImportConfirm" 
       ref="batchImportDialogRef"
     />
     <BatchExportDialog
+      v-if="showBatchExportDialog"
       v-model="showBatchExportDialog"
       :accounts="batchExportAccounts"
     />
-    <LogsDialog />
-    <StatsDialog />
-    <AccountInfoDialog />
+    <LogsDialog v-if="uiStore.showLogsDialog" />
+    <StatsDialog v-if="uiStore.showStatsDialog" />
+    <AccountInfoDialog v-if="uiStore.showAccountInfoDialog" />
     
     <!-- 关于对话框 -->
     <AboutDialog 
+      v-if="showAbout"
       v-model="showAbout"
       :current-email="currentWindsurfEmail"
       :windsurf-version="windsurfVersion"
@@ -452,16 +464,16 @@
     />
 
     <!-- 自动更新对话框 -->
-    <UpdateDialog v-model="showUpdateDialog" :current-version="appVersion" />
+    <UpdateDialog v-if="showUpdateDialog" v-model="showUpdateDialog" :current-version="appVersion" />
 
-    <AutoResetDialog v-model="showAutoResetDialog" />
+    <AutoResetDialog v-if="showAutoResetDialog" v-model="showAutoResetDialog" />
     
     <!-- 虚拟卡生成对话框 -->
-    <CardGeneratorDialog v-model="showCardGeneratorDialog" />
+    <CardGeneratorDialog v-if="showCardGeneratorDialog" v-model="showCardGeneratorDialog" />
     
     <!-- 账单对话框（传入当前查看的账号ID和数据） -->
     <BillingDialog 
-      v-if="uiStore.currentViewingAccountId"
+      v-if="uiStore.showBillingDialog && uiStore.currentViewingAccountId"
       v-model="uiStore.showBillingDialog"
       :account-id="uiStore.currentViewingAccountId"
       :billing-data="currentBillingData"
@@ -471,6 +483,7 @@
     
     <!-- 批量更换订阅对话框 -->
     <BatchUpdatePlanDialog 
+      v-if="showBatchUpdatePlanDialog"
       v-model="showBatchUpdatePlanDialog"
       :selected-account-ids="Array.from(accountsStore.selectedAccounts)"
       :accounts="batchPlanAccounts"
@@ -479,6 +492,7 @@
     
     <!-- 标签管理对话框 -->
     <TagManageDialog 
+      v-if="showTagManageDialog"
       v-model="showTagManageDialog"
       :selected-account-ids="Array.from(accountsStore.selectedAccounts)"
       @refresh="accountsStore.loadAccounts()"
@@ -486,6 +500,7 @@
     
     <!-- 批量更改分组对话框 -->
     <el-dialog
+      v-if="showBatchGroupDialog"
       v-model="showBatchGroupDialog"
       title="批量更改分组"
       width="400px"
@@ -525,6 +540,7 @@
 
     <!-- 批量转让订阅对话框 -->
     <el-dialog
+      v-if="showBatchTransferDialog"
       v-model="showBatchTransferDialog"
       title="批量转让订阅"
       width="600px"
@@ -655,6 +671,13 @@ const accountsStore = useAccountsStore();
 const settingsStore = useSettingsStore();
 const uiStore = useUIStore();
 
+const SIDEBAR_MENU_EXPAND_DELAY_MS = 140;
+const ACCOUNT_CARD_INITIAL_RENDER_COUNT = 20;
+const ACCOUNT_CARD_RENDER_BATCH_SIZE = 20;
+const menuCollapsed = ref(uiStore.sidebarCollapsed);
+let sidebarMenuTimer: ReturnType<typeof setTimeout> | undefined;
+let accountRenderFrameId: number | undefined;
+
 const activeMenu = ref('accounts');
 const searchQuery = ref('');
 const currentBillingData = ref<any>(null);
@@ -678,6 +701,9 @@ const batchGroupTarget = ref('');
 const isBatchUpdatingGroup = ref(false);
 const showAutoResetDialog = ref(false);
 const showCardGeneratorDialog = ref(false);
+const visibleAccountCount = ref(ACCOUNT_CARD_INITIAL_RENDER_COUNT);
+const renderedAccounts = computed(() => accountsStore.paginatedAccounts.slice(0, visibleAccountCount.value));
+const isRenderingAccountBatch = computed(() => visibleAccountCount.value < accountsStore.paginatedAccounts.length);
 
 // 排序相关
 const currentSortField = ref<string>('custom');
@@ -830,6 +856,95 @@ const hasActiveFilter = computed(() => {
 });
 
 const sidebarWidth = computed(() => uiStore.sidebarCollapsed ? '64px' : '240px');
+
+function clearSidebarMenuTimer() {
+  if (sidebarMenuTimer !== undefined) {
+    clearTimeout(sidebarMenuTimer);
+    sidebarMenuTimer = undefined;
+  }
+}
+
+function scheduleMenuExpand() {
+  clearSidebarMenuTimer();
+  sidebarMenuTimer = setTimeout(() => {
+    if (!uiStore.sidebarCollapsed) {
+      menuCollapsed.value = false;
+    }
+    sidebarMenuTimer = undefined;
+  }, SIDEBAR_MENU_EXPAND_DELAY_MS);
+}
+
+function toggleSidebar() {
+  if (uiStore.sidebarCollapsed) {
+    uiStore.toggleSidebar();
+    scheduleMenuExpand();
+    return;
+  }
+
+  menuCollapsed.value = true;
+  requestAnimationFrame(() => {
+    uiStore.toggleSidebar();
+  });
+}
+
+watch(() => uiStore.sidebarCollapsed, (collapsed) => {
+  if (collapsed) {
+    clearSidebarMenuTimer();
+    menuCollapsed.value = true;
+    return;
+  }
+
+  scheduleMenuExpand();
+});
+
+function clearAccountRenderFrame() {
+  if (accountRenderFrameId !== undefined) {
+    cancelAnimationFrame(accountRenderFrameId);
+    accountRenderFrameId = undefined;
+  }
+}
+
+function scheduleAccountBatchRender() {
+  clearAccountRenderFrame();
+
+  const renderNextBatch = () => {
+    const total = accountsStore.paginatedAccounts.length;
+    if (visibleAccountCount.value >= total) {
+      accountRenderFrameId = undefined;
+      return;
+    }
+
+    visibleAccountCount.value = Math.min(
+      visibleAccountCount.value + ACCOUNT_CARD_RENDER_BATCH_SIZE,
+      total
+    );
+
+    if (visibleAccountCount.value < total) {
+      accountRenderFrameId = requestAnimationFrame(renderNextBatch);
+      return;
+    }
+
+    accountRenderFrameId = undefined;
+  };
+
+  accountRenderFrameId = requestAnimationFrame(renderNextBatch);
+}
+
+watch(
+  () => accountsStore.paginatedAccounts.map(account => account.id).join('|'),
+  () => {
+    const total = accountsStore.paginatedAccounts.length;
+    visibleAccountCount.value = Math.min(ACCOUNT_CARD_INITIAL_RENDER_COUNT, total);
+
+    if (visibleAccountCount.value < total) {
+      scheduleAccountBatchRender();
+      return;
+    }
+
+    clearAccountRenderFrame();
+  },
+  { immediate: true }
+);
 
 // 全选状态：在分组视图中用该分组账号数判断，无分组时用总数
 const isAllSelected = computed(() => {
@@ -2060,6 +2175,8 @@ onMounted(async () => {
 
 // 组件卸载时清除自动重置定时器
 onUnmounted(() => {
+  clearSidebarMenuTimer();
+  clearAccountRenderFrame();
   autoResetTimerMap.value.forEach(timer => clearInterval(timer));
   autoResetTimerMap.value.clear();
 });
@@ -2076,8 +2193,12 @@ onUnmounted(() => {
   border-right: 1px solid #e4e7ed;
   display: flex;
   flex-direction: column;
-  transition: width 0.3s;
+  transition: width 0.22s cubic-bezier(0.2, 0, 0.2, 1);
   overflow: hidden;
+  contain: layout paint style;
+  isolation: isolate;
+  will-change: width;
+  transform: translateZ(0);
 }
 
 /* 全局隐藏侧边栏的所有滚动条 */
@@ -2113,6 +2234,9 @@ onUnmounted(() => {
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
+  min-height: 64px;
+  position: relative;
+  transition: padding 0.22s cubic-bezier(0.2, 0, 0.2, 1);
   
   .el-icon {
     flex-shrink: 0;
@@ -2137,10 +2261,33 @@ onUnmounted(() => {
   padding: 16px 8px;
 }
 
+.sidebar.is-collapsed .app-title {
+  padding: 16px 8px;
+  justify-content: center;
+}
+
+.app-title-text {
+  position: absolute;
+  top: 50%;
+  left: 48px;
+  right: 12px;
+  opacity: 1;
+  transform: translate3d(0, -50%, 0);
+  transition: opacity 0.14s ease, transform 0.18s cubic-bezier(0.2, 0, 0.2, 1);
+  will-change: opacity, transform;
+  pointer-events: none;
+}
+
+.sidebar.is-collapsed .app-title-text {
+  opacity: 0;
+  transform: translate3d(-8px, -50%, 0);
+}
+
 .sidebar-menu {
   flex: 1;
   border-right: none;
   overflow: hidden !important;
+  contain: layout paint;
 }
 
 /* 隐藏Element Plus菜单的滚动条 */
@@ -2168,8 +2315,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 28px;
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: 0 20px;
   height: 64px;
+  min-height: 64px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
   position: relative;
   z-index: 10;
@@ -2179,7 +2329,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .search-input {
@@ -2229,7 +2380,44 @@ onUnmounted(() => {
   display: flex;
   gap: 2px;
   align-items: center;
+  justify-content: flex-end;
   flex-wrap: nowrap;
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.header.has-selected-actions {
+  gap: 6px;
+  padding: 0 14px;
+}
+
+.header.has-selected-actions .search-input {
+  width: 180px;
+}
+
+.header.has-selected-actions .sort-select {
+  width: 96px;
+}
+
+.header.has-selected-actions .header-right {
+  gap: clamp(6px, 0.8vw, 12px);
+}
+
+.header.has-selected-actions .header-right :deep(.el-button.is-circle),
+.header.has-selected-actions .header-right :deep(.theme-trigger) {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+}
+
+.header.has-selected-actions .header-right :deep(.el-button .el-icon),
+.header.has-selected-actions .header-right :deep(.theme-trigger .el-icon) {
+  font-size: 16px;
+}
+
+.header-right :deep(.el-button.is-circle),
+.header-right :deep(.theme-trigger) {
+  margin: 0;
 }
 
 /* 圆形按钮徒加徽章样式 */
@@ -2391,6 +2579,7 @@ onUnmounted(() => {
   transition: all 0.3s ease;
   width: 40px;
   height: 40px;
+  flex: 0 0 auto;
 }
 
 /* 默认圆形按钮 - 统一的灰色风格 */
@@ -2642,24 +2831,85 @@ onUnmounted(() => {
 
 .accounts-container {
   width: 100%;
+  position: relative;
+}
+
+.accounts-container.is-refreshing .accounts-grid {
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.accounts-loading-overlay {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-light);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.1);
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
 }
 
 .accounts-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
-  gap: 8px;
-  width: 100%;
-  padding: 0;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(272px, 28vw, 360px), 360px));
+  gap: 16px;
+  padding: 0 0 20px;
+  justify-content: start;
+  align-items: start;
+}
+
+.account-rendering-hint {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 4px;
+  color: #909399;
+  font-size: 12px;
 }
 
 /* 响应式布局 */
 @media (max-width: 1400px) {
   .accounts-grid {
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 360px));
   }
 }
 
 @media (max-width: 1024px) {
+  .header {
+    gap: 6px;
+    padding: 0 12px;
+  }
+
+  .header.has-selected-actions {
+    gap: 4px;
+    padding: 0 8px;
+  }
+
+  .header.has-selected-actions .header-left {
+    gap: 4px;
+  }
+
+  .header.has-selected-actions .search-input {
+    width: 140px;
+  }
+
+  .header.has-selected-actions .sort-select {
+    width: 82px;
+  }
+
+  .header.has-selected-actions .header-right :deep(.el-button.is-circle),
+  .header.has-selected-actions .header-right :deep(.theme-trigger) {
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
+  }
+
   .main-content {
     padding: 10px 6px;
   }
@@ -2674,8 +2924,29 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
   
-  .header-left {
-    max-width: 200px;
+  .header {
+    padding: 0 6px;
+    gap: 4px;
+  }
+
+  .header.has-selected-actions .search-input {
+    width: 120px;
+  }
+
+  .header.has-selected-actions .sort-select {
+    width: 74px;
+  }
+
+  .header.has-selected-actions .header-right :deep(.el-button.is-circle),
+  .header.has-selected-actions .header-right :deep(.theme-trigger) {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+  }
+
+  .header.has-selected-actions .header-right :deep(.el-button .el-icon),
+  .header.has-selected-actions .header-right :deep(.theme-trigger .el-icon) {
+    font-size: 14px;
   }
   
   .main-content {
