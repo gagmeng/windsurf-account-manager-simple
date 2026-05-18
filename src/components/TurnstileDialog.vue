@@ -5,6 +5,7 @@
     width="400px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
+    append-to-body
     @close="handleClose"
   >
     <div class="turnstile-container">

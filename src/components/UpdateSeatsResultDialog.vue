@@ -3,6 +3,7 @@
     v-model="visible"
     title="座位更新结果"
     width="600px"
+    append-to-body
     @close="handleClose"
   >
     <div v-if="resultData">

@@ -119,10 +119,41 @@ pub async fn add_account_by_devin_session_token(
         .ok_or_else(|| "GetCurrentUser 响应未找到 email，无法建立账号".to_string())?
         .to_string();
 
-    // 已存在检查（SQLite 精准查询，替代全量 get_all_accounts 遍历）
-    if store.account_store.email_exists(&email).unwrap_or(false) {
-        return Err(format!("账号 {} 已存在", email));
-    }
+    // 智能识别：邮箱已存在时，尝试提取 org_id 用 plus addressing 创建子号
+    let org_id_from_user_info = user_info
+        .get("user")
+        .and_then(|u| u.get("team_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let (actual_email, parent_id) = if store.account_store.email_exists(&email).unwrap_or(false) {
+        // 邮箱已存在 → 查找已有母号，用 plus addressing 创建子号
+        let existing_parent = store.account_store.get_account_by_email(&email)
+            .ok()
+            .flatten();
+        let parent_uuid = existing_parent.map(|acc| acc.id);
+
+        let suffix = if !org_id_from_user_info.is_empty() {
+            org_id_from_user_info.clone()
+        } else {
+            chrono::Utc::now().format("%m%d%H%M").to_string()
+        };
+        let child_email = if let Some(at_pos) = email.find('@') {
+            let (local, domain) = email.split_at(at_pos);
+            format!("{}+{}{}", local, suffix, domain)
+        } else {
+            format!("{}+{}", email, suffix)
+        };
+
+        if store.account_store.email_exists(&child_email).unwrap_or(false) {
+            return Err(format!("账号 {} 已存在（子号也已导入）", child_email));
+        }
+
+        (child_email, parent_uuid)
+    } else {
+        (email.clone(), None)
+    };
 
     let final_nickname = nickname
         .clone()
@@ -130,12 +161,17 @@ pub async fn add_account_by_devin_session_token(
             let trimmed = s.trim().to_string();
             if trimmed.is_empty() { None } else { Some(trimmed) }
         })
-        .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
+        .unwrap_or_else(|| {
+            if parent_id.is_some() {
+                format!("{} (子号)", email.split('@').next().unwrap_or(&email))
+            } else {
+                email.split('@').next().unwrap_or(&email).to_string()
+            }
+        });
 
     // v1.7.8 批量导入性能修复：_no_save 变体 + 末尾 request_save_coalesced 合并落盘
-    // session_token 迁入场景无原始密码，password 字段留空
     let mut account = store
-        .add_account_no_save(email.clone(), String::new(), final_nickname)
+        .add_account_no_save(actual_email.clone(), String::new(), final_nickname)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -147,13 +183,12 @@ pub async fn add_account_by_devin_session_token(
     account.token_expires_at = Some(devin_session_pseudo_expires_at());
     account.auth_provider = Some("devin".to_string());
     // devin_account_id / devin_auth1_token / devin_primary_org_id 留空（仅 session_token 路径）
+    account.parent_account_id = parent_id;
 
     // 复用已拿到的 user_info 回填配额 / 套餐 / api_key 等字段
     apply_user_info_to_account(&mut account, user_info);
 
-    // 补拉 GetPlanStatus：回填 billing_strategy + daily/weekly_quota_remaining_percent
-    // 等 QUOTA 模式专用字段，避免账号卡降级到 CREDITS 积分显示。
-    // GetCurrentUser 已在上方完成，这里只多发一次 GetPlanStatus 网络请求。
+    // 补拉 GetPlanStatus
     enrich_account_with_plan_status(&mut account, &token_trimmed).await;
 
     store
@@ -164,9 +199,9 @@ pub async fn add_account_by_devin_session_token(
     let log = OperationLog::new(
         OperationType::AddAccount,
         OperationStatus::Success,
-        format!("通过 Devin session_token 添加账号: {}", email),
+        format!("通过 Devin session_token 添加账号: {}", actual_email),
     )
-    .with_account(account.id, email.clone());
+    .with_account(account.id, actual_email.clone());
     let _ = store.add_log(log).await;
 
     // v1.7.8 批量导入性能修复：统一触发一次合并落盘（非阻塞）
@@ -175,7 +210,7 @@ pub async fn add_account_by_devin_session_token(
     Ok(json!({
         "success": true,
         "account": account,
-        "email": email,
+        "email": actual_email,
         "plan_name": account.plan_name,
         "used_quota": account.used_quota,
         "total_quota": account.total_quota,
@@ -1098,6 +1133,36 @@ pub async fn add_account_by_devin_auth1_token(
         .await
         .map_err(|e| format!("auth1_token 无效或已过期：{}", e))?;
 
+    // 多组织场景：session_token 为空说明需要选择 org
+    if post_auth.session_token.is_empty() {
+        if !post_auth.orgs.is_empty() {
+            if auto_pick {
+                let pick_org = post_auth
+                    .primary_org_id
+                    .as_deref()
+                    .unwrap_or_else(|| &post_auth.orgs[0].id);
+                return Box::pin(add_account_by_devin_auth1_token(
+                    token_trimmed,
+                    Some(pick_org.to_string()),
+                    nickname,
+                    tags,
+                    group,
+                    Some(false),
+                    store,
+                ))
+                .await;
+            }
+            return Ok(json!({
+                "success": false,
+                "requires_org_selection": true,
+                "auth1_token": post_auth.auth1_token.unwrap_or(token_trimmed),
+                "orgs": post_auth.orgs,
+                "message": "检测到多个组织，请选择一个继续"
+            }));
+        }
+        return Err("auth1_token 无效或已过期：WindsurfPostAuth 响应未包含 session_token".to_string());
+    }
+
     let session_token = post_auth.session_token.clone();
     // 服务端若在响应中轮换了 auth1_token，以新值为准；否则沿用用户输入
     let effective_auth1_token = post_auth
@@ -1252,15 +1317,8 @@ pub(crate) async fn persist_devin_account_from_login_result(
     login: &DevinLoginResult,
     log_reason: &str,
 ) -> Result<Account, String> {
-    // 已存在检查（邮箱不区分大小写）
-    let existing = store
-        .get_all_accounts()
-        .await
-        .map_err(|e| e.to_string())?;
-    if existing
-        .iter()
-        .any(|acc| acc.email.to_lowercase() == email.to_lowercase())
-    {
+    // 已存在检查（使用 SQLite 索引查询，避免全量 get_all_accounts）
+    if store.account_store.email_exists(email).unwrap_or(false) {
         return Err(format!("账号 {} 已存在", email));
     }
 

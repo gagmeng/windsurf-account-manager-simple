@@ -1460,10 +1460,18 @@ fn parse_windsurf_post_auth_response(bytes: &[u8]) -> AppResult<WindsurfPostAuth
         }
     }
 
-    if result.session_token.is_empty() {
-        return Err(AppError::Api(
-            "WindsurfPostAuth 响应未包含 session_token".to_string(),
-        ));
+    // 多组织场景下 session_token 可能为空（需 UI 二次选组织后才返回）
+    // 仅当 session_token 和 orgs 都为空时才视为解析错误
+    if result.session_token.is_empty() && result.orgs.is_empty() && result.auth1_token.is_none() {
+        let preview_len = bytes.len().min(200);
+        let raw_preview = String::from_utf8_lossy(&bytes[..preview_len]);
+        return Err(AppError::Api(format!(
+            "WindsurfPostAuth 响应未包含 session_token 且无组织列表。\
+            响应长度={}字节，前{}字节: {}",
+            bytes.len(),
+            preview_len,
+            raw_preview
+        )));
     }
 
     Ok(result)
@@ -1558,7 +1566,10 @@ fn parse_check_user_login_method_response(
     Ok(result)
 }
 
-/// 解析 WindsurfPostAuthOrg 子消息（field 1=id, field 2=name）
+/// 解析 WindsurfPostAuthOrg 子消息
+///
+/// 新版响应中 org 包含额外字段（plan_slug, subscription_status 等 varint/string），
+/// 需要正确跳过不感兴趣的 wire type。
 fn parse_windsurf_org(bytes: &[u8]) -> Option<WindsurfOrg> {
     let mut org = WindsurfOrg::default();
     let mut i = 0;
@@ -1568,23 +1579,31 @@ fn parse_windsurf_org(bytes: &[u8]) -> Option<WindsurfOrg> {
         i += consumed;
         let field_no = (tag >> 3) as u32;
         let wire_type = (tag & 0x7) as u8;
-        if wire_type != 2 {
-            // 当前结构只使用字符串字段，其它类型直接中止
-            return None;
+
+        match wire_type {
+            2 => {
+                let (len, consumed_len) = decode_varint(bytes, i)?;
+                i += consumed_len;
+                let end = i + len as usize;
+                if end > bytes.len() {
+                    break;
+                }
+                let payload = &bytes[i..end];
+                match field_no {
+                    1 => org.id = String::from_utf8_lossy(payload).into_owned(),
+                    2 => org.name = String::from_utf8_lossy(payload).into_owned(),
+                    _ => {}
+                }
+                i = end;
+            }
+            0 => {
+                let (_, c) = decode_varint(bytes, i)?;
+                i += c;
+            }
+            1 => i += 8,
+            5 => i += 4,
+            _ => break,
         }
-        let (len, consumed_len) = decode_varint(bytes, i)?;
-        i += consumed_len;
-        let end = i + len as usize;
-        if end > bytes.len() {
-            return None;
-        }
-        let payload = &bytes[i..end];
-        match field_no {
-            1 => org.id = String::from_utf8_lossy(payload).into_owned(),
-            2 => org.name = String::from_utf8_lossy(payload).into_owned(),
-            _ => {}
-        }
-        i = end;
     }
 
     if org.id.is_empty() && org.name.is_empty() {

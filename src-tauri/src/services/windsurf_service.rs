@@ -542,48 +542,19 @@ impl WindsurfService {
     }
     
     pub async fn get_team_billing(&self, ctx: &AuthContext) -> AppResult<serde_json::Value> {
-        let token = ctx.token_str();
         let url = format!("{}/exa.seat_management_pb.SeatManagementService/GetTeamBilling", WINDSURF_BASE_URL);
-        
-        // GetTeamBilling的body格式: 0x0a + token长度 + token
-        // 注意：不是 0x0a 0xa1 0x07，那是UpdatePlan用的
-        let token_bytes = token.as_bytes();
-        let token_length = token_bytes.len();
-        
-        let mut full_body = vec![0x0a];
-        
-        // Token长度（使用varint编码）
-        if token_length < 128 {
-            full_body.push(token_length as u8);
-        } else {
-            full_body.push(((token_length & 0x7F) | 0x80) as u8);
-            full_body.push((token_length >> 7) as u8);
-        }
-        
-        full_body.extend_from_slice(token_bytes);
         
         println!("[GetTeamBilling] Sending request to {}", url);
         
+        // 新协议：application/json + 空 body {}，auth 纯靠 headers
         let result = self.client
             .post(&url)
-            .body(full_body)
+            .body("{}")
             .header("accept", "*/*")
-            .header("accept-language", "zh-CN,zh;q=0.9")
-            .header("cache-control", "no-cache")
             .header("connect-protocol-version", "1")
-            .header("content-type", "application/proto")
-            .header("pragma", "no-cache")
-            .header("priority", "u=1, i")
-            .header("sec-ch-ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99""#)
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", r#""Windows""#)
-            .header("sec-fetch-dest", "empty")
-            .header("sec-fetch-mode", "cors")
-            .header("sec-fetch-site", "same-site")
-            .with_auth(ctx)
-            .header("x-debug-email", "")
-            .header("x-debug-team-name", "")
+            .header("content-type", "application/json")
             .header("Referer", "https://windsurf.com/")
+            .with_auth(ctx)
             .send()
             .await;
         
@@ -592,30 +563,87 @@ impl WindsurfService {
                 let status_code = response.status().as_u16();
                 println!("[GetTeamBilling] Response status: {}", status_code);
                 
-                let response_bytes = response.bytes().await.unwrap_or_default();
-                println!("[GetTeamBilling] Response size: {} bytes", response_bytes.len());
+                let response_text = response.text().await.unwrap_or_default();
+                println!("[GetTeamBilling] Response size: {} bytes", response_text.len());
                 
-                if status_code == 200 && response_bytes.len() > 0 {
-                    // 尝试解析Protobuf响应
-                    match crate::services::proto_parser::ProtobufParser::parse_get_team_billing_response(&response_bytes) {
+                if status_code == 200 && !response_text.is_empty() {
+                    // 新协议返回 JSON，直接解析
+                    match serde_json::from_str::<serde_json::Value>(&response_text) {
                         Ok(parsed) => {
                             println!("[GetTeamBilling] Successfully parsed billing response");
-                            Ok(parsed)
+
+                            // 从 teamsTier 映射 plan_name
+                            let teams_tier = parsed.get("planStatus")
+                                .and_then(|v| v.get("planInfo"))
+                                .and_then(|v| v.get("teamsTier"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let plan_name = match teams_tier {
+                                "TEAMS_TIER_PRO" => "pro",
+                                "TEAMS_TIER_PRO_ULTIMATE" => "pro_ultimate",
+                                "TEAMS_TIER_TEAMS" => "teams",
+                                "TEAMS_TIER_TEAMS_ULTIMATE" => "teams_ultimate",
+                                "TEAMS_TIER_ENTERPRISE_SAAS" => "enterprise",
+                                "TEAMS_TIER_ENTERPRISE_SELF_SERVE" => "enterprise_self_serve",
+                                "TEAMS_TIER_FREE" => "free",
+                                "TEAMS_TIER_TRIAL" => "trial",
+                                "TEAMS_TIER_MAX" => "max",
+                                "TEAMS_TIER_DEVIN_TRIAL" => "devin_trial",
+                                "TEAMS_TIER_DEVIN_PRO" => "devin_pro",
+                                "TEAMS_TIER_DEVIN_MAX" => "devin_max",
+                                "TEAMS_TIER_DEVIN_FREE" => "devin_free",
+                                "TEAMS_TIER_DEVIN_TEAMS" | "TEAMS_TIER_DEVIN_TEAMS_V2" => "devin_teams",
+                                "TEAMS_TIER_DEVIN_ENTERPRISE" => "devin_enterprise",
+                                _ => teams_tier,
+                            };
+                            let on_trial = teams_tier.contains("TRIAL");
+
+                            // subInterval 映射
+                            let sub_interval_raw = parsed.get("subInterval").and_then(|v| v.as_str()).unwrap_or("");
+                            let sub_interval = match sub_interval_raw {
+                                "SUB_INTERVAL_MONTH" => "monthly",
+                                "SUB_INTERVAL_YEAR" => "yearly",
+                                _ => sub_interval_raw,
+                            };
+
+                            // numSeats 转数字
+                            let num_seats = parsed.get("numSeats")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(0);
+
+                            Ok(json!({
+                                "success": true,
+                                "plan_name": plan_name,
+                                "on_trial": on_trial,
+                                "subscription_active": parsed.get("subscriptionActive").and_then(|v| v.as_bool()).unwrap_or(false),
+                                "subscription_renewal_time": parsed.get("subscriptionRenewalTime").and_then(|v| v.as_str()).unwrap_or(""),
+                                "num_seats": num_seats,
+                                "sub_interval": sub_interval,
+                                "plan_info": parsed.get("planStatus").and_then(|v| v.get("planInfo")).cloned().unwrap_or(json!({})),
+                                "raw": parsed
+                            }))
                         },
                         Err(e) => {
-                            println!("[GetTeamBilling] Failed to parse response: {}", e);
-                            Ok(json!({
-                                "success": false,
-                                "error": format!("Parse error: {}", e),
-                                "raw_response": general_purpose::STANDARD.encode(&response_bytes)
-                            }))
+                            println!("[GetTeamBilling] Failed to parse JSON response: {}", e);
+                            // 降级：尝试旧版 protobuf 解析（兼容 Firebase 账号可能仍返回 proto）
+                            let response_bytes = response_text.as_bytes();
+                            match crate::services::proto_parser::ProtobufParser::parse_get_team_billing_response(response_bytes) {
+                                Ok(parsed) => Ok(parsed),
+                                Err(_) => Ok(json!({
+                                    "success": false,
+                                    "error": format!("Parse error: {}", e),
+                                    "raw_response": response_text
+                                }))
+                            }
                         }
                     }
                 } else {
                     Ok(json!({
                         "success": false,
                         "status_code": status_code,
-                        "error": "Invalid response"
+                        "error": "Invalid response",
+                        "raw_response": response_text
                     }))
                 }
             },

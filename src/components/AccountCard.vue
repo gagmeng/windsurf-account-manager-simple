@@ -74,13 +74,13 @@
           <div class="quota-percent-row">
             <span class="quota-percent-label">日配额</span>
             <el-progress
-              :percentage="account.daily_quota_remaining_percent ?? 0"
+              :percentage="Math.max(0, account.daily_quota_remaining_percent ?? 0)"
               :stroke-width="8"
               :color="dailyQuotaColor"
               :show-text="false"
               class="quota-percent-bar"
             />
-            <span class="quota-percent-value">{{ account.daily_quota_remaining_percent ?? 0 }}%</span>
+            <span class="quota-percent-value">{{ Math.max(0, account.daily_quota_remaining_percent ?? 0) }}%</span>
             <span class="quota-reset-time" v-if="formatResetTime(account.daily_quota_reset_at_unix)">
               {{ formatResetTime(account.daily_quota_reset_at_unix) }}
             </span>
@@ -88,13 +88,13 @@
           <div class="quota-percent-row">
             <span class="quota-percent-label">周配额</span>
             <el-progress
-              :percentage="account.weekly_quota_remaining_percent ?? 0"
+              :percentage="Math.max(0, account.weekly_quota_remaining_percent ?? 0)"
               :stroke-width="8"
               :color="weeklyQuotaColor"
               :show-text="false"
               class="quota-percent-bar"
             />
-            <span class="quota-percent-value">{{ account.weekly_quota_remaining_percent ?? 0 }}%</span>
+            <span class="quota-percent-value">{{ Math.max(0, account.weekly_quota_remaining_percent ?? 0) }}%</span>
             <span class="quota-reset-time" v-if="formatResetTime(account.weekly_quota_reset_at_unix)">
               {{ formatResetTime(account.weekly_quota_reset_at_unix) }}
             </span>

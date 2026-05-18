@@ -5,6 +5,7 @@
     width="900px"
     :close-on-click-modal="false"
     destroy-on-close
+    append-to-body
     class="team-management-dialog"
   >
     <div v-loading="loading" class="team-container">
@@ -570,19 +571,17 @@ async function loadTeamMembers() {
     if (result.success) {
       const data = result.data || {}
       
-      // subMesssage_1 是 User[] 数组（可能是单个对象）
-      let users = data.subMesssage_1 || []
-      // 如果是单个对象，转换为数组
+      // JSON 协议：data.users / data.userRoles / data.userCascadeDetails
+      // 兼容旧 proto 格式：data.subMesssage_1 / data.subMesssage_2 / data.subMesssage_4
+      let users = data.users || data.subMesssage_1 || []
       if (users && !Array.isArray(users)) {
         users = [users]
       }
-      // subMesssage_2 是 UserRole[] 数组（可能是单个对象）
-      let userRoles = data.subMesssage_2 || []
+      let userRoles = data.userRoles || data.subMesssage_2 || []
       if (userRoles && !Array.isArray(userRoles)) {
         userRoles = [userRoles]
       }
-      // subMesssage_4 是 UserCascadeDetails，可能是数组或单个对象
-      const cascadeDetails = data.subMesssage_4 || []
+      const cascadeDetails = data.userCascadeDetails || data.subMesssage_4 || []
       
       // 构建成员列表
       const approvedList: TeamMember[] = []
@@ -591,39 +590,42 @@ async function loadTeamMembers() {
       // 遍历用户数组
       if (Array.isArray(users) && users.length > 0) {
         for (const user of users) {
-          const apiKey = user.string_1 || ''
-          const firebaseId = user.string_6 || ''
-          const name = user.string_2 || ''
-          const email = user.string_3 || ''
-          const teamStatus = user.int_8 || 0
-          // signup_time: field 4 是 Timestamp，其 seconds 在 subMesssage_4.int_1
-          const signUpTime = user.subMesssage_4?.int_1 || 0
-          // last_update_time: field 26 是 Timestamp
-          const lastUpdateTime = user.subMesssage_26?.int_1 || 0
-          // disable_codeium: field 16，bool 类型，解析为 int_16
-          const disableCodeium = user.int_16 === 1
+          // JSON 协议字段名 → 兼容旧 proto 字段名
+          const apiKey = user.apiKey || user.string_1 || ''
+          const firebaseId = user.id || user.string_6 || ''
+          const name = user.name || user.string_2 || ''
+          const email = user.email || user.string_3 || ''
+          const teamStatusStr = user.teamStatus || ''
+          const teamStatus = teamStatusStr === 'USER_TEAM_STATUS_APPROVED' ? 2
+            : teamStatusStr === 'USER_TEAM_STATUS_PENDING' ? 1
+            : (user.int_8 || 0)
+          const signUpTime = user.signupTime
+            ? Math.floor(new Date(user.signupTime).getTime() / 1000)
+            : (user.subMesssage_4?.int_1 || 0)
+          const lastUpdateTime = user.lastActiveTime
+            ? Math.floor(new Date(user.lastActiveTime).getTime() / 1000)
+            : (user.subMesssage_26?.int_1 || 0)
+          const disableCodeium = user.disabledTelemetry || user.int_16 === 1
           
           // 查找角色
           let role = 'User'
           if (Array.isArray(userRoles)) {
-            const roleInfo = userRoles.find((r: any) => r.string_1 === apiKey)
+            const roleInfo = userRoles.find((r: any) => (r.apiKey || r.string_1) === apiKey)
             if (roleInfo) {
-              role = roleInfo.string_4 || roleInfo.string_2 || 'User'
+              role = roleInfo.roleName || roleInfo.string_4 || roleInfo.string_2 || 'User'
             }
           }
           
           // 查找使用量（通过 firebase_id 关联）
           let promptsUsed = 0
           if (Array.isArray(cascadeDetails)) {
-            // 如果是数组
-            const usageInfo = cascadeDetails.find((c: any) => c.string_1 === firebaseId)
+            const usageInfo = cascadeDetails.find((c: any) => (c.userId || c.string_1) === firebaseId)
             if (usageInfo) {
-              promptsUsed = usageInfo.int_2 || 0
+              promptsUsed = usageInfo.promptCount || usageInfo.int_2 || 0
             }
           } else if (cascadeDetails && typeof cascadeDetails === 'object') {
-            // 如果是单个对象
-            if (cascadeDetails.string_1 === firebaseId) {
-              promptsUsed = cascadeDetails.int_2 || 0
+            if ((cascadeDetails.userId || cascadeDetails.string_1) === firebaseId) {
+              promptsUsed = cascadeDetails.promptCount || cascadeDetails.int_2 || 0
             }
           }
           
@@ -1033,23 +1035,23 @@ async function loadPendingInvitations() {
     if (result.success) {
       const data = result.data || {}
       console.log('[PendingInvitations] Full data:', JSON.stringify(data, null, 2))
-      const preapprovals = data.subMesssage_1 || []
+      // JSON 协议：data.preapprovals 或 result.preapprovals；兼容旧 proto：data.subMesssage_1
+      const preapprovals = data.preapprovals || result.preapprovals || data.subMesssage_1 || []
       console.log('[PendingInvitations] preapprovals:', preapprovals)
       
       if (Array.isArray(preapprovals)) {
         pendingInvitations.value = preapprovals.map((p: any) => ({
-          id: p.string_1 || '',
-          name: p.string_2 || '',
-          email: p.string_3 || '',
-          created_at: p.subMesssage_6?.int_1
+          id: p.id || p.string_1 || '',
+          name: p.name || p.string_2 || '',
+          email: p.email || p.string_3 || '',
+          created_at: p.createdAt ? Math.floor(new Date(p.createdAt).getTime() / 1000) : (p.subMesssage_6?.int_1)
         }))
       } else if (preapprovals && typeof preapprovals === 'object') {
-        // 可能是单个对象而不是数组
         pendingInvitations.value = [{
-          id: preapprovals.string_1 || '',
-          name: preapprovals.string_2 || '',
-          email: preapprovals.string_3 || '',
-          created_at: preapprovals.subMesssage_6?.int_1
+          id: preapprovals.id || preapprovals.string_1 || '',
+          name: preapprovals.name || preapprovals.string_2 || '',
+          email: preapprovals.email || preapprovals.string_3 || '',
+          created_at: preapprovals.createdAt ? Math.floor(new Date(preapprovals.createdAt).getTime() / 1000) : (preapprovals.subMesssage_6?.int_1)
         }]
       } else {
         pendingInvitations.value = []
@@ -1100,9 +1102,9 @@ async function loadMyInvitation() {
     if (result.success && result.has_pending_invitation) {
       const data = result.data || {}
       myInvitation.value = {
-        approval_id: data.subMesssage_1?.string_1 || '',
-        team_name: data.string_3 || '',
-        admin_name: data.string_2 || ''
+        approval_id: data.preapproval?.id || data.subMesssage_1?.string_1 || '',
+        team_name: data.teamName || data.string_3 || '',
+        admin_name: data.adminName || data.string_2 || ''
       }
     } else {
       myInvitation.value = null
@@ -1529,9 +1531,9 @@ watch(dialogVisible, (val) => {
 }, { immediate: true })
 </script>
 
-<style scoped>
+<style>
 /* 全局容器 */
-  .team-management-dialog :deep(.el-dialog__body) {
+  .team-management-dialog .el-dialog__body {
     padding: 0;
     background-color: #f8fafc;
   }

@@ -5,6 +5,7 @@
     width="90%"
     class="analytics-dialog"
     :close-on-click-modal="false"
+    append-to-body
     @close="handleClose"
   >
     <div v-loading="loading" class="analytics-container">
@@ -399,22 +400,6 @@ let chatModelChart: ECharts | null = null;
 let completionsByDayChart: ECharts | null = null;
 let chatsByDayChart: ECharts | null = null;
 
-// 监听 modelValue 变化
-watch(() => props.modelValue, (val) => {
-  visible.value = val;
-  if (val) {
-    loadAnalytics();
-  }
-}, { immediate: true });
-
-// 监听 visible 变化
-watch(visible, (val) => {
-  emit('update:modelValue', val);
-  if (!val) {
-    destroyCharts();
-  }
-});
-
 // 加载分析数据
 const loadAnalytics = async () => {
   loading.value = true;
@@ -435,6 +420,22 @@ const loadAnalytics = async () => {
     loading.value = false;
   }
 };
+
+// 监听 modelValue 变化（必须在 loadAnalytics 声明之后，避免 TDZ 错误）
+watch(() => props.modelValue, (val) => {
+  visible.value = val;
+  if (val) {
+    loadAnalytics();
+  }
+}, { immediate: true });
+
+// 监听 visible 变化
+watch(visible, (val) => {
+  emit('update:modelValue', val);
+  if (!val) {
+    destroyCharts();
+  }
+});
 
 // 初始化所有图表
 const initCharts = async () => {

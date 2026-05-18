@@ -4,6 +4,7 @@
     title="自动充值设置"
     width="520px"
     :close-on-click-modal="false"
+    append-to-body
     @open="loadSettings"
   >
     <div class="auto-refill-container">

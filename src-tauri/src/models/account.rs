@@ -82,6 +82,18 @@ pub struct Account {
     /// 认证提供方："firebase"（默认旧体系）或 "devin"（Devin Session 新体系）
     #[serde(default)]
     pub auth_provider: Option<String>,
+
+    // ==================== Devin 组织（母号/子号）字段 ====================
+
+    /// 母号 ID：子号指向其来源母号的 account.id
+    #[serde(default)]
+    pub parent_account_id: Option<Uuid>,
+    /// 该账号对应的 Devin 组织 ID
+    #[serde(default)]
+    pub devin_org_id: Option<String>,
+    /// 该账号对应的 Devin 组织 slug name
+    #[serde(default)]
+    pub devin_org_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +141,9 @@ impl Account {
             devin_account_id: None,
             devin_primary_org_id: None,
             auth_provider: None,
+            parent_account_id: None,
+            devin_org_id: None,
+            devin_org_name: None,
         }
     }
 

@@ -5,6 +5,7 @@
     width="700px"
     :close-on-click-modal="false"
     destroy-on-close
+    append-to-body
     class="team-settings-dialog"
   >
     <div v-loading="loading" class="settings-container">
@@ -964,13 +965,11 @@ function removeMcpServer(index: number) {
 }
 </script>
 
-<style lang="scss" scoped>
-.team-settings-dialog {
-  :deep(.el-dialog__body) {
-    padding: 16px 24px;
-    max-height: 70vh;
-    overflow-y: auto;
-  }
+<style lang="scss">
+.team-settings-dialog .el-dialog__body {
+  padding: 16px 24px;
+  max-height: 70vh;
+  overflow-y: auto;
 }
 
 .settings-container {
@@ -1052,8 +1051,8 @@ function removeMcpServer(index: number) {
   }
 }
 
-// 下拉选项样式 (全局样式)
-:global(.model-select-dropdown) {
+// 下拉选项样式
+.model-select-dropdown {
   .el-select-dropdown__item {
     padding: 8px 12px;
     height: auto;

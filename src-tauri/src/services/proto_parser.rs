@@ -1228,14 +1228,15 @@ impl ProtobufParser {
                 }
             }
             
-            // field 14: daily_quota_remaining_percent
-            if let Some(v) = plan_status.get("int_14").and_then(|v| v.as_i64()) {
-                result["daily_quota_remaining_percent"] = json!(v);
-            }
-            // field 15: weekly_quota_remaining_percent
-            if let Some(v) = plan_status.get("int_15").and_then(|v| v.as_i64()) {
-                result["weekly_quota_remaining_percent"] = json!(v);
-            }
+            // field 14: daily_quota_remaining_percent (int32, 0-100)
+            // 注意：protobuf 默认值优化 — 值为 0 时字段不传输，需显式补 0
+            result["daily_quota_remaining_percent"] = json!(
+                plan_status.get("int_14").and_then(|v| v.as_i64()).unwrap_or(0)
+            );
+            // field 15: weekly_quota_remaining_percent (int32, 0-100)
+            result["weekly_quota_remaining_percent"] = json!(
+                plan_status.get("int_15").and_then(|v| v.as_i64()).unwrap_or(0)
+            );
             // field 16: overage_balance_micros
             if let Some(v) = plan_status.get("int_16").and_then(|v| v.as_i64()) {
                 result["overage_balance_micros"] = json!(v);

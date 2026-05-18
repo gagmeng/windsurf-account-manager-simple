@@ -5,6 +5,7 @@
     width="1100px"
     class="plan-dialog"
     :close-on-click-modal="false"
+    append-to-body
     @close="handleClose"
   >
     <div class="plan-selection">
@@ -663,7 +664,7 @@ function handleClose() {
 }
 </script>
 
-<style scoped lang="scss">
+<style lang="scss">
 .plan-selection {
   padding: 10px;
 }

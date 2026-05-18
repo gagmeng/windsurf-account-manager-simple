@@ -5,6 +5,7 @@
     width="1000px"
     class="account-info-dialog"
     :close-on-click-modal="false"
+    append-to-body
     @close="handleClose"
   >
     <div v-if="loading" class="loading-container">

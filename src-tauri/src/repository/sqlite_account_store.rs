@@ -122,7 +122,25 @@ impl SqliteAccountStore {
         conn.execute_batch(Self::CREATE_SCHEMA)
             .map_err(|e| AppError::Config(format!("SQLite schema failed: {}", e)))?;
 
+        // 增量迁移：为已有数据库添加新字段
+        Self::migrate_columns(&conn);
+
         Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    fn migrate_columns(conn: &Connection) {
+        let migrations = [
+            "ALTER TABLE accounts ADD COLUMN parent_account_id TEXT",
+            "ALTER TABLE accounts ADD COLUMN devin_org_id TEXT",
+            "ALTER TABLE accounts ADD COLUMN devin_org_name TEXT",
+        ];
+        for sql in &migrations {
+            let _ = conn.execute(sql, []);
+        }
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_accounts_parent_account_id ON accounts(parent_account_id)",
+            [],
+        );
     }
 
     const CREATE_SCHEMA: &'static str = r#"
@@ -160,7 +178,10 @@ impl SqliteAccountStore {
             devin_auth1_token TEXT,
             devin_account_id TEXT,
             devin_primary_org_id TEXT,
-            auth_provider TEXT
+            auth_provider TEXT,
+            parent_account_id TEXT,
+            devin_org_id TEXT,
+            devin_org_name TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_accounts_group ON accounts("group");
@@ -184,7 +205,8 @@ impl SqliteAccountStore {
                 daily_quota_remaining_percent, weekly_quota_remaining_percent,
                 daily_quota_reset_at_unix, weekly_quota_reset_at_unix,
                 overage_balance_micros, sort_order,
-                devin_auth1_token, devin_account_id, devin_primary_org_id, auth_provider
+                devin_auth1_token, devin_account_id, devin_primary_org_id, auth_provider,
+                parent_account_id, devin_org_id, devin_org_name
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
@@ -194,7 +216,8 @@ impl SqliteAccountStore {
                 ?25, ?26,
                 ?27, ?28,
                 ?29, ?30,
-                ?31, ?32, ?33, ?34
+                ?31, ?32, ?33, ?34,
+                ?35, ?36, ?37
             )"#,
             params![
                 account.id.to_string(),
@@ -231,6 +254,9 @@ impl SqliteAccountStore {
                 account.devin_account_id,
                 account.devin_primary_org_id,
                 account.auth_provider,
+                account.parent_account_id.map(|u| u.to_string()),
+                account.devin_org_id,
+                account.devin_org_name,
             ],
         ).map_err(|e| AppError::Config(format!("insert_account: {}", e)))?;
         Ok(())
@@ -248,7 +274,8 @@ impl SqliteAccountStore {
                 daily_quota_remaining_percent, weekly_quota_remaining_percent,
                 daily_quota_reset_at_unix, weekly_quota_reset_at_unix,
                 overage_balance_micros, sort_order,
-                devin_auth1_token, devin_account_id, devin_primary_org_id, auth_provider
+                devin_auth1_token, devin_account_id, devin_primary_org_id, auth_provider,
+                parent_account_id, devin_org_id, devin_org_name
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
@@ -258,7 +285,8 @@ impl SqliteAccountStore {
                 ?25, ?26,
                 ?27, ?28,
                 ?29, ?30,
-                ?31, ?32, ?33, ?34
+                ?31, ?32, ?33, ?34,
+                ?35, ?36, ?37
             )"#,
             params![
                 account.id.to_string(),
@@ -295,6 +323,9 @@ impl SqliteAccountStore {
                 account.devin_account_id,
                 account.devin_primary_org_id,
                 account.auth_provider,
+                account.parent_account_id.map(|u| u.to_string()),
+                account.devin_org_id,
+                account.devin_org_name,
             ],
         ).map_err(|e| AppError::Config(format!("upsert_account: {}", e)))?;
         Ok(())
@@ -919,6 +950,12 @@ impl SqliteAccountStore {
             devin_account_id: row.get("devin_account_id")?,
             devin_primary_org_id: row.get("devin_primary_org_id")?,
             auth_provider: row.get("auth_provider")?,
+            parent_account_id: {
+                let s: Option<String> = row.get("parent_account_id")?;
+                s.and_then(|v| Uuid::parse_str(&v).ok())
+            },
+            devin_org_id: row.get("devin_org_id")?,
+            devin_org_name: row.get("devin_org_name")?,
         })
     }
 

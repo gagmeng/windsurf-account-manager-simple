@@ -5,6 +5,7 @@
     width="800px"
     class="billing-dialog"
     :close-on-click-modal="false"
+    append-to-body
     @close="handleClose"
   >
     <div v-if="loading" class="loading-container">
@@ -331,12 +332,21 @@ function formatPaymentType(type: string) {
 function formatPlanName(name: string) {
   const names: Record<string, string> = {
     'pro': 'Pro 专业版',
+    'pro_ultimate': 'Pro Ultimate',
     'teams': 'Teams 团队版',
+    'teams_ultimate': 'Teams Ultimate',
     'enterprise': 'Enterprise 企业版',
     'enterprise_self_serve': 'Enterprise 企业自助版',
     'trial': 'Trial 试用版',
     'free': 'Free 免费版',
-    'starter': 'Starter 入门版'
+    'starter': 'Starter 入门版',
+    'max': 'Max',
+    'devin_trial': 'Devin Trial 试用版',
+    'devin_pro': 'Devin Pro',
+    'devin_max': 'Devin Max',
+    'devin_free': 'Devin Free',
+    'devin_teams': 'Devin Teams',
+    'devin_enterprise': 'Devin Enterprise',
   };
   return names[name?.toLowerCase()] || name || '未知';
 }
